@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-alpha"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy<2",
+    "pandas<3",
+    "protobuf<5",
+    "pyqlib>=0.9.7",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+    "setuptools<81",
+    "xgboost>=3.2.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
