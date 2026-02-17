@@ -40,14 +40,8 @@ mlruns/
 # --- Qlib runtime outputs ---
 outputs/
 
-# --- Local qlib datasets (large artifacts) ---
-data/qlib/
-data/qlib_bin.tar.gz
-
-# --- Factor library (SQLite, generated data) ---
-data/factor_library.db
-data/factor_library.db-wal
-data/factor_library.db-shm
+# --- Local data (large artifacts, generated) ---
+data/
 
 # --- Temporary config files from workflow ---
 configs/tmp*.yaml
