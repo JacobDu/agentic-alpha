@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/Volumes/Workspace/agentic-alpha"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${1:-5000}"
 HOST="${MLFLOW_HOST:-127.0.0.1}"
 BACKEND_URI="file://${ROOT_DIR}/mlruns"

@@ -1,5 +1,5 @@
 qlib_init:
-  provider_uri: "/Volumes/Workspace/agentic-alpha/data/qlib/cn_data"
+  provider_uri: "data/qlib/cn_data"
   region: cn
 
 market: &market csi300

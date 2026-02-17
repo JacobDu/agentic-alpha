@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,47 @@ def _build_env() -> dict[str, str]:
     return env
 
 
+def _resolve_config(config_path: Path) -> Path:
+    """Resolve provider_uri placeholder in config YAML.
+
+    If provider_uri is a relative path (no leading /), resolve it relative to PROJECT_ROOT.
+    Returns the original path if no changes needed, or a temp file with resolved paths.
+    """
+    text = config_path.read_text(encoding="utf-8")
+    provider_uri_str = str((PROJECT_ROOT / "data" / "qlib" / "cn_data").resolve())
+
+    # Replace relative provider_uri (e.g. "data/qlib/cn_data") with absolute path
+    import re
+    match = re.search(r'provider_uri:\s*["\']?([^"\'\n]+)["\']?', text)
+    if match:
+        uri = match.group(1).strip()
+        if not uri.startswith("/"):
+            # Relative path — resolve against PROJECT_ROOT
+            resolved = str((PROJECT_ROOT / uri).resolve())
+            text = text.replace(uri, resolved)
+        elif uri != provider_uri_str and "data/qlib/cn_data" in uri:
+            # Absolute path pointing to wrong location — fix it
+            text = text.replace(uri, provider_uri_str)
+
+    if text != config_path.read_text(encoding="utf-8"):
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", dir=config_path.parent, delete=False
+        )
+        tmp.write(text)
+        tmp.close()
+        return Path(tmp.name)
+    return config_path
+
+
 def run_qrun(config_path: Path, log_path: Path) -> dict[str, Any]:
     start = time.time()
     env = _build_env()
-    cmd = [sys.executable, "-m", "qlib.cli.run", str(config_path)]
+    resolved_config = _resolve_config(config_path)
+    cmd = [sys.executable, "-m", "qlib.cli.run", str(resolved_config)]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    # Clean up temp config if created
+    if resolved_config != config_path:
+        resolved_config.unlink(missing_ok=True)
     elapsed = time.time() - start
 
     log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -32,7 +32,7 @@ from project_qlib.workflow import run_qrun
 
 # --- Shared config template (lite = memory optimized) ---
 LITE_CONFIG_TEMPLATE = """qlib_init:
-  provider_uri: "/Volumes/Workspace/agentic-alpha/data/qlib/cn_data"
+  provider_uri: "{provider_uri}"
   region: cn
 
 market: &market csiall
@@ -141,6 +141,7 @@ def write_config(name: str) -> Path:
     exp = EXPERIMENTS[name]
     config_path = PROJECT_ROOT / "configs" / f"workflow_csiall_{name}_lite.yaml"
     content = LITE_CONFIG_TEMPLATE.format(
+        provider_uri=str((PROJECT_ROOT / "data" / "qlib" / "cn_data").resolve()),
         handler_class=exp["handler_class"],
         handler_module=exp["handler_module"],
     )

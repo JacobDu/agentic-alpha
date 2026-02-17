@@ -28,8 +28,9 @@ from project_qlib.workflow import run_qrun
 def create_topn_config(n: int) -> Path:
     """Create a YAML config for TopN handler."""
     config_path = PROJECT_ROOT / "configs" / f"workflow_csiall_topn{n}_lightgbm.yaml"
+    provider_uri = str((PROJECT_ROOT / "data" / "qlib" / "cn_data").resolve())
     content = f"""qlib_init:
-  provider_uri: "/Volumes/Workspace/agentic-alpha/data/qlib/cn_data"
+  provider_uri: "{provider_uri}"
   region: cn
 
 market: &market csiall

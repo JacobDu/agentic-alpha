@@ -1,9 +1,17 @@
-"""Unified IC test: Alpha158 (158) + Custom (43) on csiall — OPTIMIZED.
+"""Unified single-factor IC significance test.
 
-Uses vectorized groupby for daily cross-sectional Rank IC computation.
+Tests Alpha158 (158) + Custom (43) = 201 factors on any market,
+computing daily cross-sectional Rank IC with t-test and FDR correction.
+Results are saved to CSV and can optionally be written to the factor library.
+
+Usage:
+    uv run python scripts/test_factor_ic.py --market csi1000
+    uv run python scripts/test_factor_ic.py --market csiall --backfill
+    uv run python scripts/test_factor_ic.py --market csi300 --start 2020-01-01 --end 2024-12-31
 """
 from __future__ import annotations
 
+import argparse
 import gc
 import sys
 from pathlib import Path
@@ -75,26 +83,20 @@ CUSTOM_FACTORS = [
 ]
 
 
-def fast_daily_rankic(factor: pd.Series, label: pd.Series) -> dict:
-    """Compute daily cross-sectional Rank IC using groupby — much faster."""
-    # Align factor and label
+def fast_daily_rankic(factor: pd.Series, label: pd.Series, min_stocks: int = 30) -> dict:
+    """Compute daily cross-sectional Rank IC using groupby."""
     combined = pd.DataFrame({"factor": factor, "label": label}).dropna()
     if len(combined) == 0:
         return {"n_days": 0, "ic_mean": np.nan, "rank_ic_mean": np.nan,
                 "rank_ic_t": np.nan, "rank_ic_p": 1.0, "rank_icir": np.nan}
 
-    # Group by date, compute spearman correlation per day
     dates = combined.index.get_level_values(1)
 
     def _spearman(g):
-        if len(g) < 50:
-            return np.nan
-        return g["factor"].rank().corr(g["label"].rank())
+        return np.nan if len(g) < min_stocks else g["factor"].rank().corr(g["label"].rank())
 
     def _pearson(g):
-        if len(g) < 50:
-            return np.nan
-        return g["factor"].corr(g["label"])
+        return np.nan if len(g) < min_stocks else g["factor"].corr(g["label"])
 
     daily_ric = combined.groupby(dates).apply(_spearman).dropna()
     daily_ic = combined.groupby(dates).apply(_pearson).dropna()
@@ -126,13 +128,59 @@ def get_alpha158_factors():
     return list(fields), list(names)
 
 
+def backfill_db(res_df: pd.DataFrame, market: str, start: str, end: str) -> None:
+    """Write results into the SQLite factor library."""
+    from project_qlib.factor_db import FactorDB
+
+    db = FactorDB()
+    for _, row in res_df.iterrows():
+        name = row["factor"]
+        fdr_p = row.get("rank_ic_p_fdr", 1.0)
+        is_sig = bool(not pd.isna(fdr_p) and fdr_p < 0.01)
+
+        # Update status for non-Baseline factors
+        existing = db.get_factor(name)
+        if existing and existing["status"] != "Baseline":
+            db.upsert_factor(name=name, status="Accepted" if is_sig else "Rejected")
+
+        db.upsert_test_result(
+            factor_name=name,
+            market=market,
+            test_start=start,
+            test_end=end,
+            n_days=int(row["n_days"]) if not pd.isna(row.get("n_days")) else None,
+            ic_mean=float(row["ic_mean"]) if not pd.isna(row.get("ic_mean")) else None,
+            rank_ic_mean=float(row["rank_ic_mean"]) if not pd.isna(row.get("rank_ic_mean")) else None,
+            rank_ic_t=float(row["rank_ic_t"]) if not pd.isna(row.get("rank_ic_t")) else None,
+            rank_ic_p=float(row["rank_ic_p"]) if not pd.isna(row.get("rank_ic_p")) else None,
+            rank_icir=float(row["rank_icir"]) if not pd.isna(row.get("rank_icir")) else None,
+            fdr_p=float(fdr_p) if not pd.isna(fdr_p) else None,
+            significant=is_sig,
+            evidence=f"outputs/{market}_unified_factor_ranking.csv",
+        )
+    print(f"\n[Backfill] Wrote {len(res_df)} results to factor library (market={market})")
+    print(db.summary(market=market))
+    db.close()
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Unified single-factor IC significance test")
+    parser.add_argument("--market", default="csi1000", help="Market universe (csi1000/csiall/csi300)")
+    parser.add_argument("--start", default="2019-01-01", help="Test start date")
+    parser.add_argument("--end", default="2025-12-31", help="Test end date")
+    parser.add_argument("--backfill", action="store_true", help="Write results to SQLite factor library")
+    parser.add_argument("--batch-size", type=int, default=30, help="Factor loading batch size")
+    args = parser.parse_args()
+
+    market = args.market
+    start_time = args.start
+    end_time = args.end
+
+    # min_stocks threshold: lower for smaller markets
+    min_stocks = 30 if market in ("csi1000", "csi300") else 50
+
     init_qlib()
     from qlib.data import D
-
-    instruments = "csiall"
-    start_time = "2019-01-01"
-    end_time = "2025-12-31"
 
     a158_fields, a158_names = get_alpha158_factors()
     cstm_fields = [f for f, _, _ in CUSTOM_FACTORS]
@@ -141,20 +189,20 @@ def main():
 
     total = len(a158_names) + len(cstm_names)
     print(f"Total: {total} factors (Alpha158={len(a158_names)}, Custom={len(cstm_names)})")
-    print(f"Market: {instruments}, {start_time} to {end_time}")
+    print(f"Market: {market}, {start_time} to {end_time}")
 
-    instruments_obj = D.instruments(instruments)
+    instruments_obj = D.instruments(market)
 
-    # Step 1: Load label once
+    # Step 1: Load label
     print("\nLoading label...")
     label_df = D.features(instruments_obj, [LABEL_EXPR], start_time=start_time, end_time=end_time)
     label = label_df.iloc[:, 0]
     print(f"  Label loaded: {len(label)} rows, {label.index.get_level_values(1).nunique()} dates")
 
     all_results = []
+    batch_size = args.batch_size
 
-    # Step 2: Process Alpha158 in batches of 30
-    batch_size = 30
+    # Step 2: Process Alpha158 in batches
     for start_idx in range(0, len(a158_fields), batch_size):
         end_idx = min(start_idx + batch_size, len(a158_fields))
         batch_fields = a158_fields[start_idx:end_idx]
@@ -164,7 +212,7 @@ def main():
         df.columns = batch_names
         for i, name in enumerate(batch_names):
             print(f"    [{start_idx+i+1}/{len(a158_names)}] {name}...", end="", flush=True)
-            res = fast_daily_rankic(df[name], label)
+            res = fast_daily_rankic(df[name], label, min_stocks=min_stocks)
             res["factor"] = name
             res["category"] = "alpha158"
             res["source"] = "Alpha158"
@@ -173,7 +221,7 @@ def main():
         del df
         gc.collect()
 
-    # Step 3: Process custom factors in batches of 30
+    # Step 3: Process custom factors in batches
     for start_idx in range(0, len(cstm_fields), batch_size):
         end_idx = min(start_idx + batch_size, len(cstm_fields))
         batch_fields = cstm_fields[start_idx:end_idx]
@@ -184,7 +232,7 @@ def main():
         df.columns = batch_names
         for i, name in enumerate(batch_names):
             print(f"    [{start_idx+i+1}/{len(cstm_names)}] {name}...", end="", flush=True)
-            res = fast_daily_rankic(df[name], label)
+            res = fast_daily_rankic(df[name], label, min_stocks=min_stocks)
             res["factor"] = name
             res["category"] = batch_cats[i]
             res["source"] = "Custom"
@@ -193,7 +241,7 @@ def main():
         del df
         gc.collect()
 
-    # FDR correction
+    # FDR correction (Benjamini-Hochberg)
     res_df = pd.DataFrame(all_results)
     p_vals = res_df["rank_ic_p"].fillna(1.0).values
     n_tests = len(p_vals)
@@ -211,27 +259,37 @@ def main():
 
     # Print top-50
     print("\n" + "=" * 130)
-    print("  UNIFIED FACTOR RANKING: Alpha158 + Custom on CSIALL (2019-2025)")
+    print(f"  UNIFIED FACTOR RANKING: Alpha158 + Custom on {market.upper()} ({start_time} to {end_time})")
     print("=" * 130)
-    print(f"{'Rank':>4} {'Factor':<25} {'Source':<10} {'Cat':<14} {'RankIC':>10} {'t-stat':>10} {'FDR_p':>12} {'ICIR':>10}")
+    header = f"{'Rank':>4} {'Factor':<25} {'Source':<10} {'Cat':<14} {'RankIC':>10} {'t-stat':>10} {'FDR_p':>12} {'ICIR':>10}"
+    print(header)
     print("-" * 130)
     for rank, (_, row) in enumerate(res_df.head(50).iterrows(), 1):
         sig = "***" if row["rank_ic_p_fdr"] < 0.01 else "**" if row["rank_ic_p_fdr"] < 0.05 else ""
-        print(f"{rank:>4} {row['factor']:<25} {row['source']:<10} {row['category']:<14} {row['rank_ic_mean']:>10.5f} {row['rank_ic_t']:>10.3f} {row['rank_ic_p_fdr']:>12.8f} {row['rank_icir']:>10.4f} {sig}")
+        print(f"{rank:>4} {row['factor']:<25} {row['source']:<10} {row['category']:<14} "
+              f"{row['rank_ic_mean']:>10.5f} {row['rank_ic_t']:>10.3f} "
+              f"{row['rank_ic_p_fdr']:>12.8f} {row['rank_icir']:>10.4f} {sig}")
 
-    # Save
-    out_full = PROJECT_ROOT / "outputs" / "csiall_unified_factor_ranking.csv"
-    res_df.to_csv(out_full, index=False)
-
-    out_top = PROJECT_ROOT / "outputs" / "csiall_unified_top50.csv"
-    res_df.head(50).to_csv(out_top, index=False)
-
-    sig_001 = (res_df["rank_ic_p_fdr"] < 0.01).sum()
+    n_sig = (res_df["rank_ic_p_fdr"] < 0.01).sum()
     a158_top20 = (res_df.head(20)["source"] == "Alpha158").sum()
     cstm_top20 = (res_df.head(20)["source"] == "Custom").sum()
-    print(f"\nSignificant (FDR<0.01): {sig_001}/{len(res_df)}")
+    print(f"\nSignificant (FDR<0.01): {n_sig}/{len(res_df)}")
     print(f"Top-20: Alpha158={a158_top20}, Custom={cstm_top20}")
-    print(f"Saved: {out_full}")
+
+    # Save CSV
+    out_dir = PROJECT_ROOT / "outputs"
+    out_dir.mkdir(exist_ok=True)
+    out_full = out_dir / f"{market}_unified_factor_ranking.csv"
+    res_df.to_csv(out_full, index=False)
+    print(f"Saved full ranking: {out_full}")
+
+    out_top = out_dir / f"{market}_unified_top50.csv"
+    res_df.head(50).to_csv(out_top, index=False)
+    print(f"Saved top-50: {out_top}")
+
+    # Backfill to DB
+    if args.backfill:
+        backfill_db(res_df, market, start_time, end_time)
 
 
 if __name__ == "__main__":
