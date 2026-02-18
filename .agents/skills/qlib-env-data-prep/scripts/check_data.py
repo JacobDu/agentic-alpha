@@ -1,7 +1,21 @@
 """Check available data fields and date range."""
 import sys
 import multiprocessing
-sys.path.insert(0, "src")
+from pathlib import Path
+
+if "--help" in sys.argv or "-h" in sys.argv:
+    print("Usage: uv run python .agents/skills/qlib-env-data-prep/scripts/check_data.py")
+    raise SystemExit(0)
+
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 if __name__ == "__main__":
     multiprocessing.set_start_method("fork", force=True)

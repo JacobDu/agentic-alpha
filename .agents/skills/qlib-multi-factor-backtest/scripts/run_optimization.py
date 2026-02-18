@@ -10,10 +10,10 @@ Systematically tests all optimization dimensions:
 Uses Qlib Python API directly for flexibility (train once, backtest many).
 
 Usage:
-    uv run python scripts/run_optimization.py                    # all phases
-    uv run python scripts/run_optimization.py --phase 1          # only Phase 1
-    uv run python scripts/run_optimization.py --phase 1,2        # Phase 1 + 2
-    uv run python scripts/run_optimization.py --phase 1 --quick  # fast mode (fewer combos)
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/run_optimization.py                    # all phases
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/run_optimization.py --phase 1          # only Phase 1
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/run_optimization.py --phase 1,2        # Phase 1 + 2
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/run_optimization.py --phase 1 --quick  # fast mode (fewer combos)
 """
 from __future__ import annotations
 
@@ -29,7 +29,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

@@ -1,27 +1,37 @@
 """Factor library CLI tool for querying and managing the SQLite factor database.
 
 Usage:
-    uv run python scripts/factor_db_cli.py list [--status STATUS] [--source SOURCE] [--market MARKET] [--top N]
-    uv run python scripts/factor_db_cli.py show FACTOR_NAME [--market MARKET]
-    uv run python scripts/factor_db_cli.py summary [--market MARKET]
-    uv run python scripts/factor_db_cli.py export [--output PATH] [--market MARKET]
-    uv run python scripts/factor_db_cli.py history FACTOR_NAME [--market MARKET]
-    uv run python scripts/factor_db_cli.py markets
-    uv run python scripts/factor_db_cli.py backtest [FACTOR_NAME] [--market MARKET] [--hold N] [--top N]
-    uv run python scripts/factor_db_cli.py decay [FACTOR_NAME] [--market MARKET] [--horizon N] [--top N]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py list [--status STATUS] [--source SOURCE] [--market MARKET] [--top N]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py show FACTOR_NAME [--market MARKET]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py summary [--market MARKET]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py export [--output PATH] [--market MARKET]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py history FACTOR_NAME [--market MARKET]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py markets
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py backtest [FACTOR_NAME] [--market MARKET] [--hold N] [--top N]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py decay [FACTOR_NAME] [--market MARKET] [--horizon N] [--top N]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py runs list [--type sfa|mfa] [--market MARKET] [--decision Promote|Iterate|Drop] [--top N]
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/factor_db_cli.py runs show ROUND_ID
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from project_qlib.factor_db import FactorDB
+from project_qlib.workflow_db import WorkflowDB
 
 
 def cmd_list(db: FactorDB, args: argparse.Namespace) -> None:
@@ -236,8 +246,52 @@ def cmd_decay(db: FactorDB, args: argparse.Namespace) -> None:
         print(f"\n({len(df)} factors)")
 
 
+def cmd_runs_list(args: argparse.Namespace) -> None:
+    wdb = WorkflowDB(db_path=args.db)
+    try:
+        rows = wdb.list_runs(
+            round_type=args.type,
+            market=args.market,
+            decision=args.decision,
+            limit=args.top,
+        )
+        if not rows:
+            print("No workflow runs found.")
+            return
+        display_cols = [
+            "round_id",
+            "round_type",
+            "date",
+            "market",
+            "rank_icir",
+            "ir_with_cost",
+            "workflow_result",
+            "decision",
+            "doc_path",
+        ]
+        for row in rows:
+            compact = {k: row.get(k) for k in display_cols}
+            print(json.dumps(compact, ensure_ascii=False))
+        print(f"\n({len(rows)} runs)")
+    finally:
+        wdb.close()
+
+
+def cmd_runs_show(args: argparse.Namespace) -> None:
+    wdb = WorkflowDB(db_path=args.db)
+    try:
+        row = wdb.get_run(args.round_id)
+        if row is None:
+            print(f"Workflow round '{args.round_id}' not found.")
+            return
+        print(json.dumps(row, ensure_ascii=False, indent=2))
+    finally:
+        wdb.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Factor library CLI")
+    parser.add_argument("--db", help="SQLite db path", default=str(PROJECT_ROOT / "data" / "factor_library.db"))
     sub = parser.add_subparsers(dest="command", required=True)
 
     # list
@@ -285,8 +339,28 @@ def main() -> int:
     p_decay.add_argument("--horizon", type=int, help="Forward return horizon in days (default: 5)")
     p_decay.add_argument("--top", type=int, help="Limit to top N results")
 
+    # runs
+    p_runs = sub.add_parser("runs", help="Workflow runs query interface")
+    runs_sub = p_runs.add_subparsers(dest="runs_command", required=True)
+
+    p_runs_list = runs_sub.add_parser("list", help="List workflow rounds")
+    p_runs_list.add_argument("--type", choices=["sfa", "mfa"], help="Filter by workflow type")
+    p_runs_list.add_argument("--market", help="Filter by market")
+    p_runs_list.add_argument("--decision", choices=["Promote", "Iterate", "Drop"], help="Filter by decision")
+    p_runs_list.add_argument("--top", type=int, help="Limit to top N runs")
+
+    p_runs_show = runs_sub.add_parser("show", help="Show a workflow round")
+    p_runs_show.add_argument("round_id", help="Round id, e.g. SFA-2026-02-18-01")
+
     args = parser.parse_args()
-    db = FactorDB()
+    if args.command == "runs":
+        if args.runs_command == "list":
+            cmd_runs_list(args)
+        elif args.runs_command == "show":
+            cmd_runs_show(args)
+        return 0
+
+    db = FactorDB(db_path=args.db)
 
     cmds = {
         "list": cmd_list,

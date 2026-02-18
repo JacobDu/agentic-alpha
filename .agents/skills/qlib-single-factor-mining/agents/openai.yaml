@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qlib 单因子挖掘"
+  short_description: "挖掘并验证单因子 IC 显著性"
+  default_prompt: "使用 $qlib-single-factor-mining 执行单因子 IC/FDR 显著性验证。"

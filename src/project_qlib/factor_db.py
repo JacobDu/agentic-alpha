@@ -132,9 +132,9 @@ CREATE TABLE IF NOT EXISTS factor_ic_decay (
 
 
 class FactorDB:
-    """SQLite-backed factor library (v2 — split definition / results)."""
+    """SQLite-backed factor library (v3 — split definition / results + workflow tables)."""
 
-    DB_VERSION = 2
+    DB_VERSION = 3
 
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
@@ -163,6 +163,8 @@ class FactorDB:
         else:
             self._conn.executescript(_SCHEMA_V2)
             self._conn.commit()
+            from project_qlib.workflow_db import ensure_workflow_schema
+            ensure_workflow_schema(self._conn)
 
     def _migrate_v1_to_v2(self) -> None:
         """Migrate from v1 (IC cols in factors) to v2 (separate tables)."""
@@ -190,6 +192,8 @@ class FactorDB:
         # 3. Create new tables
         self._conn.executescript(_SCHEMA_V2)
         self._conn.commit()
+        from project_qlib.workflow_db import ensure_workflow_schema
+        ensure_workflow_schema(self._conn)
 
         # 4. Insert factor definitions
         now = datetime.now(timezone.utc).isoformat()

@@ -5,9 +5,9 @@ computing daily cross-sectional Rank IC with t-test and FDR correction.
 Results are saved to CSV and can optionally be written to the factor library.
 
 Usage:
-    uv run python scripts/test_factor_ic.py --market csi1000
-    uv run python scripts/test_factor_ic.py --market csiall --backfill
-    uv run python scripts/test_factor_ic.py --market csi300 --start 2020-01-01 --end 2024-12-31
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/test_factor_ic.py --market csi1000
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/test_factor_ic.py --market csiall --backfill
+    uv run python .agents/skills/qlib-single-factor-mining/scripts/test_factor_ic.py --market csi300 --start 2020-01-01 --end 2024-12-31
 """
 from __future__ import annotations
 
@@ -16,7 +16,13 @@ import gc
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

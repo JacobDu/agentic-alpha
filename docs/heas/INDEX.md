@@ -13,5 +13,7 @@
 
 维护规则：
 1. 每新增一轮 `docs/heas/HEA-YYYY-MM-DD-XX.md`，必须同步在本表新增一行。
-2. `evidence` 至少包含一个可追溯标识：`run_id`、`outputs/...` 路径或 `factor_db_cli` 查询命令。
-3. `decision` 仅允许 `Promote` / `Iterate` / `Drop`。
+2. 新轮次中 `evidence` 若引用脚本，统一使用 `.agents/skills/<skill>/scripts/<script>` 路径。
+3. 历史单轮 HEA 文档允许保留旧路径，不强制回改。
+4. `evidence` 至少包含一个可追溯标识：`run_id`、`outputs/...` 路径或 `factor_db_cli` 查询命令。
+5. `decision` 仅允许 `Promote` / `Iterate` / `Drop`。

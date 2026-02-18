@@ -5,19 +5,19 @@ incremental updates. No dependency on chenditc/investment_data for ongoing use.
 
 Usage:
     # Download all data (daily + quarterly)
-    uv run python scripts/download_financial_data.py
+    uv run python .agents/skills/qlib-env-data-prep/scripts/download_financial_data.py
 
     # Phase 1 only: daily OHLCV + valuation (incremental by default)
-    uv run python scripts/download_financial_data.py --phase 1
+    uv run python .agents/skills/qlib-env-data-prep/scripts/download_financial_data.py --phase 1
 
     # Phase 2 only: quarterly fundamentals + dividends + industry (resumable)
-    uv run python scripts/download_financial_data.py --phase 2
+    uv run python .agents/skills/qlib-env-data-prep/scripts/download_financial_data.py --phase 2
 
     # Force full re-download from baostock
-    uv run python scripts/download_financial_data.py --force
+    uv run python .agents/skills/qlib-env-data-prep/scripts/download_financial_data.py --force
 
     # Check status of all features
-    uv run python scripts/download_financial_data.py --status
+    uv run python .agents/skills/qlib-env-data-prep/scripts/download_financial_data.py --status
 
 Injected Qlib features:
     Phase 1 (daily, from K-line API + query_adjust_factor, 2 API calls per stock):
@@ -43,7 +43,13 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

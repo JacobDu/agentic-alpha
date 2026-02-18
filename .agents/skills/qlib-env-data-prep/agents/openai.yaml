@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qlib 环境与数据准备"
+  short_description: "准备并验证 Qlib 环境与研究数据"
+  default_prompt: "使用 $qlib-env-data-prep 完成 Qlib 环境与数据的准备和验证。"

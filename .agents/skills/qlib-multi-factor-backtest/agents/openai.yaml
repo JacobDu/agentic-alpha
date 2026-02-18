@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qlib 多因子回测"
+  short_description: "训练 Top-N 因子并执行含成本回测"
+  default_prompt: "使用 $qlib-multi-factor-backtest 执行 Top-N 多因子训练与含成本回测。"

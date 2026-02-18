@@ -4,9 +4,9 @@ Runs TopN20/30/50 + Baseline comparison on CSI1000 (~1000 stocks).
 Uses extended date range including 2026 data.
 
 Usage:
-    uv run python scripts/train_csi1000_lite.py
-    uv run python scripts/train_csi1000_lite.py --only baseline
-    uv run python scripts/train_csi1000_lite.py --only topn20,topn30,topn50,baseline
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/train_csi1000_lite.py
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/train_csi1000_lite.py --only baseline
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/train_csi1000_lite.py --only topn20,topn30,topn50,baseline
 """
 from __future__ import annotations
 
@@ -17,7 +17,13 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

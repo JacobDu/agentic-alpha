@@ -2,8 +2,8 @@
 
 Default usage: specify a factor name to generate a comprehensive report page.
 
-    uv run python scripts/visualize_factors.py CSTM_MAX_RET_20
-    uv run python scripts/visualize_factors.py CSTM_AMT_CV_20 --groups 10
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/visualize_factors.py CSTM_MAX_RET_20
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/visualize_factors.py CSTM_AMT_CV_20 --groups 10
 
 Individual chart subcommands:
   - ranking:   Top-N factors bar chart by |ICIR|
@@ -18,9 +18,9 @@ Individual chart subcommands:
 All single-chart commands open in browser by default. Use --save to only save.
 
 Usage:
-    uv run python scripts/visualize_factors.py CSTM_MAX_RET_20          # full report
-    uv run python scripts/visualize_factors.py ranking --top 20         # single chart
-    uv run python scripts/visualize_factors.py quantile CSTM_MAX_RET_20 --groups 5
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/visualize_factors.py CSTM_MAX_RET_20          # full report
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/visualize_factors.py ranking --top 20         # single chart
+    uv run python .agents/skills/qlib-multi-factor-backtest/scripts/visualize_factors.py quantile CSTM_MAX_RET_20 --groups 5
 """
 from __future__ import annotations
 
@@ -34,7 +34,13 @@ import sys
 import webbrowser
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    raise RuntimeError("Cannot locate project root (pyproject.toml not found)")
+
+PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
