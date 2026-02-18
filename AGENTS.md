@@ -308,6 +308,7 @@ Qlib 数据目录 `data/qlib/cn_data/features/{stock}/` 中每个字段对应一
 9. 16GB 内存优化：csiall + 158 因子需缩短训练窗口(3yr)，减少 num_leaves(128)。
 10. 数据源统一使用 baostock，支持增量更新。Phase 1 force 模式：raw K-line + query_adjust_factor（2 API calls/stock），增量模式：raw K-line（1 API call/stock）。Phase 2：19 个季度字段 + 分红 + 行业。详见「📊 可用数据字段」。
 11. CSI1000 与 csiall 因子排名高度一致（Top-20 重合 18/20），可在 CSI1000 上快速验证。
-12. 双周调仓（hold=10）最优：IR=1.61 远超日度 1.21 和月度 0.21。信号需要时间兑现但不宜过长。
+12. hold_thresh 是收益第一驱动因素：hold=20 最优（IR=+1.564），所有 hold≥15 正收益，所有 hold≤10 负收益。最佳组合 topk=30/n_drop=5/hold=20 年化超额+17.23%。
 13. 数据交叉验证（akshare）：OHLC 零误差，volume 单位=前复权手（baostock 股/factor/100），amount 单位=千元（baostock 元/1000）。财务指标 20/23 通过（87%），仅 ROE 定义差异（平均 vs 加权）和少数 EPS/增长率口径差异。
 14. query_adjust_factor API 仅返回除权日事件（~10-30 行），forward-fill 到每日与 adj_close/raw_close 计算结果完全一致（14136 天零误差）。
+15. Qlib LGBModel 仅接受 loss∈{mse,binary}，其他目标(huber/mae)需构造后覆盖 model.params["objective"]。XGBModel 直接接受 xgb.train 原生参数。

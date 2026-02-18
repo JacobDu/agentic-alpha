@@ -37,6 +37,8 @@ Injected Qlib features:
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
+import socket
 import sys
 import time
 from pathlib import Path
@@ -625,6 +627,7 @@ def download_phase1(stocks: list[str], start: str = "2000-01-01",
         print(f"Mode: incremental (1 API call/stock, existing scale)")
 
     bs.login()
+    _bs_set_socket_timeout()  # prevent socket hangs
 
     # Extend calendar to cover the requested end date
     calendar = _extend_calendar(end)
@@ -715,8 +718,211 @@ def download_phase1(stocks: list[str], start: str = "2000-01-01",
 # Phase 2: Quarterly financials + dividends + industry
 # -----------------------------------------------------------------------
 
+# Socket timeout for baostock API calls (seconds)
+_BS_SOCKET_TIMEOUT = 30
+_BS_MAX_RETRIES = 3
+
+
+def _bs_reconnect() -> None:
+    """Force logout + login to reset baostock connection."""
+    import baostock as bs
+    try:
+        bs.logout()
+    except Exception:
+        pass
+    time.sleep(1)
+    bs.login()
+    _bs_set_socket_timeout()
+
+
+def _bs_set_socket_timeout(timeout: int = _BS_SOCKET_TIMEOUT) -> None:
+    """Set timeout on baostock's internal socket to prevent hangs."""
+    try:
+        from baostock.common import context
+        sock = getattr(context, "default_socket", None)
+        if sock is not None:
+            sock.settimeout(timeout)
+    except Exception:
+        pass
+
+
+def _bs_safe_call(fn, *args, retries: int = _BS_MAX_RETRIES, **kwargs):
+    """Call a baostock API function with retry on failure.
+
+    Socket timeout is set globally once (not per-call) to avoid overhead.
+    On error, reconnects and retries up to `retries` times.
+    Returns the result set, or None on complete failure.
+    """
+    import baostock as bs
+    for attempt in range(retries):
+        try:
+            rs = fn(*args, **kwargs)
+            return rs
+        except (socket.timeout, TimeoutError, ConnectionError,
+                BrokenPipeError, OSError) as e:
+            if attempt < retries - 1:
+                print(f"    [retry {attempt+1}/{retries}] {type(e).__name__}: {e}",
+                      flush=True)
+                _bs_reconnect()
+            else:
+                print(f"    [FAIL] {fn.__name__} after {retries} retries: {e}",
+                      flush=True)
+                return None
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"    [retry {attempt+1}/{retries}] {type(e).__name__}: {e}",
+                      flush=True)
+                _bs_reconnect()
+            else:
+                return None
+
+
+def _worker_download_chunk(args: tuple) -> tuple:
+    """Download quarterly data for a chunk of stocks (runs in subprocess).
+
+    Each worker opens its own baostock connection.
+    Returns (quarterly_records, dividend_records, stats_dict).
+    """
+    import baostock as bs
+
+    (chunk_stocks, start_year, end_year,
+     cached_yq_tuples, cached_div_tuples, worker_id) = args
+
+    cached_yq = set(cached_yq_tuples)
+    cached_div = set(cached_div_tuples)
+
+    bs.login()
+    _bs_set_socket_timeout()
+
+    quarterly_records: list[dict] = []
+    dividend_records: list[dict] = []
+    api_calls = 0
+    api_skipped = 0
+    stock_probed_empty = 0
+    stock_errors = 0
+    t0 = time.time()
+
+    for i, qlib_code in enumerate(chunk_stocks):
+        bs_code = _qlib_code_to_baostock(qlib_code)
+        feature_dir = FEATURES_DIR / qlib_code.lower()
+        if not feature_dir.exists():
+            continue
+
+        # Skip index codes
+        if (qlib_code.startswith("SH000") or qlib_code.startswith("SZ399")
+                or qlib_code.startswith("BJ")):
+            stock_probed_empty += 1
+            continue
+
+        try:
+            # Quick probe: check a recent quarter first
+            probe_yr, probe_q = end_year - 1, 3
+            if (qlib_code, probe_yr, probe_q) not in cached_yq:
+                fn = getattr(bs, "query_profit_data")
+                rs = _bs_safe_call(fn, code=bs_code, year=probe_yr,
+                                   quarter=probe_q)
+                api_calls += 1
+                has_probe_data = (rs is not None and rs.error_code == "0"
+                                  and rs.next())
+                if not has_probe_data:
+                    probe_yr2, probe_q2 = end_year - 5, 4
+                    rs2 = _bs_safe_call(fn, code=bs_code, year=probe_yr2,
+                                        quarter=probe_q2)
+                    api_calls += 1
+                    has_probe_data = (rs2 is not None
+                                      and rs2.error_code == "0"
+                                      and rs2.next())
+                if not has_probe_data:
+                    stock_probed_empty += 1
+                    continue
+
+            for yr in range(start_year, end_year + 1):
+                for q in range(1, 5):
+                    if (qlib_code, yr, q) in cached_yq:
+                        continue
+
+                    record: dict = {"qlib_code": qlib_code, "year": yr,
+                                    "quarter": q}
+                    has_any_data = False
+
+                    for api_name, api_cfg in QUARTERLY_APIS_CONFIG.items():
+                        fn = getattr(bs, api_cfg["fn"])
+                        rs = _bs_safe_call(fn, code=bs_code, year=yr,
+                                           quarter=q)
+                        api_calls += 1
+                        if (rs is not None and rs.error_code == "0"
+                                and rs.next()):
+                            row_data = dict(zip(rs.fields,
+                                                rs.get_row_data()))
+                            if not record.get("pub_date"):
+                                record["pub_date"] = row_data.get(
+                                    "pubDate", "")
+                            for bs_f in api_cfg["fields"]:
+                                val = row_data.get(bs_f, "")
+                                if val and val != "":
+                                    has_any_data = True
+                                record[bs_f] = val
+                        else:
+                            if api_name == "profit":
+                                api_skipped += 5
+                                break
+
+                    quarterly_records.append(record)
+
+                # Dividends
+                if (qlib_code, yr) not in cached_div:
+                    rs = _bs_safe_call(bs.query_dividend_data,
+                                       code=bs_code, year=str(yr),
+                                       yearType="report")
+                    api_calls += 1
+                    if rs is not None:
+                        div_df = rs.get_data()
+                        if not div_df.empty:
+                            for _, drow in div_df.iterrows():
+                                cash_ps = drow.get(
+                                    "dividCashPsBeforeTax", "")
+                                reg_date = drow.get(
+                                    "dividRegistDate", "")
+                                if (cash_ps and cash_ps != ""
+                                        and reg_date and reg_date != ""):
+                                    try:
+                                        dividend_records.append({
+                                            "qlib_code": qlib_code,
+                                            "year": yr,
+                                            "regist_date": reg_date,
+                                            "cash_ps": float(cash_ps),
+                                        })
+                                    except (ValueError, TypeError):
+                                        pass
+
+        except Exception as e:
+            stock_errors += 1
+
+        if (i + 1) % 50 == 0:
+            el = time.time() - t0
+            print(f"    W{worker_id} [{i+1}/{len(chunk_stocks)}] {el:.0f}s "
+                  f"api={api_calls} empty={stock_probed_empty}",
+                  flush=True)
+
+    bs.logout()
+    el = time.time() - t0
+    print(f"  W{worker_id} done: {len(chunk_stocks)} stocks, "
+          f"{len(quarterly_records)} records, "
+          f"{api_calls} api, {stock_probed_empty} empty, "
+          f"{stock_errors} err, {el:.0f}s", flush=True)
+
+    stats = {
+        "api_calls": api_calls,
+        "api_skipped": api_skipped,
+        "stock_probed_empty": stock_probed_empty,
+        "stock_errors": stock_errors,
+    }
+    return quarterly_records, dividend_records, stats
+
+
 def download_phase2(stocks: list[str], start_year: int = 2010,
-                    end_year: int | None = None, force: bool = False) -> None:
+                    end_year: int | None = None, force: bool = False,
+                    workers: int = 4) -> None:
     """Download quarterly financials, dividends, and industry.
 
     Incremental by default: reads cached data, finds the latest quarter
@@ -771,11 +977,14 @@ def download_phase2(stocks: list[str], start_year: int = 2010,
                    if any((s, yr, q) not in cached_yq
                           for yr, q in all_yq_pairs)]
 
-    print(f"\n--- Phase 2: Quarterly + Dividends + Industry ---")
-    print(f"  Stocks: {len(stocks)} total, {len(stocks_todo)} need update")
-    print(f"  Period: {start_year} ~ {end_year} ({len(all_yq_pairs)} quarters)")
-    print(f"  Cached: {len(cached_yq)} stock-quarters, todo: {total_todo}")
-    print(f"  Quarterly fields: {len(ALL_QUARTERLY_FIELDS)}")
+    print(f"\n--- Phase 2: Quarterly + Dividends + Industry ---", flush=True)
+    print(f"  Stocks: {len(stocks)} total, {len(stocks_todo)} need update",
+          flush=True)
+    print(f"  Period: {start_year} ~ {end_year} ({len(all_yq_pairs)} quarters)",
+          flush=True)
+    print(f"  Cached: {len(cached_yq)} stock-quarters, todo: {total_todo}",
+          flush=True)
+    print(f"  Quarterly fields: {len(ALL_QUARTERLY_FIELDS)}", flush=True)
 
     # If all downloaded, just inject
     if not stocks_todo:
@@ -787,132 +996,89 @@ def download_phase2(stocks: list[str], start_year: int = 2010,
             _inject_dividends_to_qlib(cached_dividends, calendar, cal_idx)
             return
 
-    bs.login()
-
     # --- Industry classification (fast, ~30s for all stocks) ---
     if not industry_file.exists():
-        print("  Downloading industry classification...")
+        bs.login()
+        _bs_set_socket_timeout()
+        print("  Downloading industry classification...", flush=True)
         ind_records = []
         for j, s in enumerate(stocks):
             bs_code = _qlib_code_to_baostock(s)
-            rs = bs.query_stock_industry(code=bs_code)
-            df = rs.get_data()
-            if not df.empty:
-                ind_records.append({
-                    "qlib_code": s,
-                    "industry": df["industry"].values[0],
-                })
+            rs = _bs_safe_call(bs.query_stock_industry, code=bs_code)
+            if rs is not None:
+                df = rs.get_data()
+                if not df.empty:
+                    ind_records.append({
+                        "qlib_code": s,
+                        "industry": df["industry"].values[0],
+                    })
             if (j + 1) % 1000 == 0:
-                print(f"    Industry [{j+1}/{len(stocks)}]")
+                print(f"    Industry [{j+1}/{len(stocks)}]", flush=True)
         if ind_records:
             ind_df = pd.DataFrame(ind_records)
             ind_df.to_parquet(industry_file, index=False)
             print(f"  Industry: {len(ind_df)} stocks, "
                   f"{ind_df['industry'].nunique()} categories")
+        bs.logout()
 
-    # --- Quarterly data + dividends ---
-    quarterly_records: list[dict] = []
-    dividend_records: list[dict] = []
+    # --- Quarterly data + dividends (parallel) ---
     t0 = time.time()
 
-    for i, qlib_code in enumerate(stocks_todo):
-        bs_code = _qlib_code_to_baostock(qlib_code)
-        feature_dir = FEATURES_DIR / qlib_code.lower()
-        if not feature_dir.exists():
-            continue
+    # Convert cached sets to tuples for pickling (multiprocessing)
+    cached_yq_tuples = tuple(cached_yq)
+    cached_div_tuples = tuple(cached_div_years)
 
-        # Quarterly financials — skip already-cached (year, quarter) pairs
-        for yr in range(start_year, end_year + 1):
-            for q in range(1, 5):
-                if (qlib_code, yr, q) in cached_yq:
-                    continue
+    # Split stocks into chunks for parallel workers
+    n_workers = min(workers, len(stocks_todo))
+    if n_workers < 1:
+        n_workers = 1
+    chunk_size = (len(stocks_todo) + n_workers - 1) // n_workers
+    chunks = [stocks_todo[i:i + chunk_size]
+              for i in range(0, len(stocks_todo), chunk_size)]
 
-                record: dict = {"qlib_code": qlib_code, "year": yr,
-                                "quarter": q}
+    print(f"  Workers: {len(chunks)}, ~{chunk_size} stocks/worker", flush=True)
 
-                for api_name, api_cfg in QUARTERLY_APIS_CONFIG.items():
-                    fn = getattr(bs, api_cfg["fn"])
-                    try:
-                        rs = fn(code=bs_code, year=yr, quarter=q)
-                        if rs.error_code == "0" and rs.next():
-                            row_data = dict(zip(rs.fields,
-                                                rs.get_row_data()))
-                            if not record.get("pub_date"):
-                                record["pub_date"] = row_data.get(
-                                    "pubDate", "")
-                            for bs_f in api_cfg["fields"]:
-                                record[bs_f] = row_data.get(bs_f, "")
-                    except Exception:
-                        pass
+    worker_args = [
+        (chunk, start_year, end_year,
+         cached_yq_tuples, cached_div_tuples, wid)
+        for wid, chunk in enumerate(chunks)
+    ]
 
-                quarterly_records.append(record)
+    # Use spawn to avoid fork issues on macOS
+    ctx = mp.get_context("spawn")
+    all_quarterly: list[dict] = []
+    all_dividends: list[dict] = []
+    total_stats = {"api_calls": 0, "api_skipped": 0,
+                   "stock_probed_empty": 0, "stock_errors": 0}
 
-            # Dividends — skip already-cached years
-            if (qlib_code, yr) not in cached_div_years:
-                try:
-                    rs = bs.query_dividend_data(
-                        code=bs_code, year=str(yr), yearType="report"
-                    )
-                    div_df = rs.get_data()
-                    if not div_df.empty:
-                        for _, drow in div_df.iterrows():
-                            cash_ps = drow.get("dividCashPsBeforeTax", "")
-                            reg_date = drow.get("dividRegistDate", "")
-                            if (cash_ps and cash_ps != ""
-                                    and reg_date and reg_date != ""):
-                                try:
-                                    dividend_records.append({
-                                        "qlib_code": qlib_code,
-                                        "year": yr,
-                                        "regist_date": reg_date,
-                                        "cash_ps": float(cash_ps),
-                                    })
-                                except (ValueError, TypeError):
-                                    pass
-                except Exception:
-                    pass
+    with ctx.Pool(n_workers) as pool:
+        results = pool.map(_worker_download_chunk, worker_args)
 
-        # Checkpoint every 50 stocks
-        if (i + 1) % 50 == 0:
-            el = time.time() - t0
-            rate = (i + 1) / el if el > 0 else 1
-            eta = (len(stocks_todo) - i - 1) / rate
+    for q_recs, d_recs, stats in results:
+        all_quarterly.extend(q_recs)
+        all_dividends.extend(d_recs)
+        for k, v in stats.items():
+            total_stats[k] += v
 
-            new_q = pd.DataFrame(quarterly_records)
-            combined_q = pd.concat([cached_quarterly, new_q],
-                                   ignore_index=True)
-            combined_q.to_parquet(cache_file)
-            cached_quarterly = combined_q
-            quarterly_records = []
-
-            if dividend_records:
-                new_d = pd.DataFrame(dividend_records)
-                combined_d = pd.concat([cached_dividends, new_d],
-                                       ignore_index=True)
-                combined_d.to_parquet(div_cache)
-                cached_dividends = combined_d
-                dividend_records = []
-
-            print(f"  Phase2 [{i+1}/{len(stocks_todo)}] {el:.0f}s, "
-                  f"ETA {eta/60:.0f} min")
-
-    bs.logout()
-
-    # Final save
-    if quarterly_records:
-        new_q = pd.DataFrame(quarterly_records)
+    # Merge with cached and save
+    if all_quarterly:
+        new_q = pd.DataFrame(all_quarterly)
         cached_quarterly = pd.concat([cached_quarterly, new_q],
                                      ignore_index=True)
-        cached_quarterly.to_parquet(cache_file)
-    if dividend_records:
-        new_d = pd.DataFrame(dividend_records)
+    cached_quarterly.to_parquet(cache_file)
+
+    if all_dividends:
+        new_d = pd.DataFrame(all_dividends)
         cached_dividends = pd.concat([cached_dividends, new_d],
                                      ignore_index=True)
-        cached_dividends.to_parquet(div_cache)
+    cached_dividends.to_parquet(div_cache)
 
     el = time.time() - t0
     print(f"Phase 2 download done: {len(cached_quarterly)} quarterly records, "
-          f"{len(cached_dividends)} dividend records, {el:.0f}s")
+          f"{len(cached_dividends)} dividend records, "
+          f"api={total_stats['api_calls']} "
+          f"empty={total_stats['stock_probed_empty']} "
+          f"err={total_stats['stock_errors']}, {el:.0f}s", flush=True)
 
     # Inject to Qlib
     _inject_quarterly_to_qlib(cached_quarterly, calendar, cal_idx)
@@ -1110,8 +1276,8 @@ def main() -> int:
         description="Download baostock financial data -> Qlib features",
     )
     parser.add_argument("--phase", type=int, choices=[1, 2],
-                        help="1=daily OHLCV+valuation, 2=quarterly+dividends"
-                             "+industry. Default: both.")
+                        help="1=daily OHLCV+valuation (default), "
+                             "2=quarterly+dividends+industry.")
     parser.add_argument("--market", default="all",
                         help="Stock universe (default: all)")
     parser.add_argument("--start", default="2000-01-01",
@@ -1124,6 +1290,8 @@ def main() -> int:
                         help="End year for Phase 2 (default: current year)")
     parser.add_argument("--force", action="store_true",
                         help="Force re-download (clear cache, ignore existing)")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Number of parallel workers for Phase 2 (default: 4)")
     parser.add_argument("--status", action="store_true",
                         help="Check status of injected features")
     parser.add_argument("--fix-headers", action="store_true",
@@ -1143,17 +1311,13 @@ def main() -> int:
     stocks = _get_stock_list(args.market)
     print(f"Total SH/SZ stocks: {len(stocks)}")
 
-    if args.phase is None:
-        download_phase1(stocks, start=args.start, end=args.end,
-                        force=args.force)
-        download_phase2(stocks, start_year=args.start_year,
-                        end_year=args.end_year, force=args.force)
-    elif args.phase == 1:
+    if args.phase is None or args.phase == 1:
         download_phase1(stocks, start=args.start, end=args.end,
                         force=args.force)
     elif args.phase == 2:
         download_phase2(stocks, start_year=args.start_year,
-                        end_year=args.end_year, force=args.force)
+                        end_year=args.end_year, force=args.force,
+                        workers=args.workers)
 
     n_fixed = _fix_nan_headers()
     if n_fixed:
