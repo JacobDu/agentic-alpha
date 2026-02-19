@@ -28,6 +28,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from project_qlib.metrics_standard import canonicalize_metrics, get_metric
 from project_qlib.runtime import PROJECT_ROOT, init_qlib
 from project_qlib.workflow import run_qrun
 
@@ -169,10 +170,13 @@ def read_mlflow_latest(experiment_id: str = "1") -> dict:
 
 
 KEY_METRICS = [
-    "IC", "ICIR", "Rank IC", "Rank ICIR",
-    "1day.excess_return_with_cost.annualized_return",
-    "1day.excess_return_with_cost.information_ratio",
-    "1day.excess_return_with_cost.max_drawdown",
+    ("ic_mean", "ic_mean"),
+    ("ic_ir", "ic_ir"),
+    ("rank_ic_mean", "rank_ic_mean"),
+    ("rank_ic_ir", "rank_ic_ir"),
+    ("excess_return_annualized_with_cost", "excess_return_annualized_with_cost"),
+    ("information_ratio_with_cost", "information_ratio_with_cost"),
+    ("max_drawdown_with_cost", "max_drawdown_with_cost"),
 ]
 
 
@@ -197,11 +201,12 @@ def run_experiment(name: str) -> dict:
         gc.collect()
         return {"name": name, "n_factors": exp["n_factors"], "success": False, "elapsed": round(elapsed, 1)}
 
-    metrics = read_mlflow_latest()
+    metrics = canonicalize_metrics(read_mlflow_latest(), keep_unknown=True)
     print(f"  Run ID: {metrics.get('run_id', 'N/A')}")
-    for k in KEY_METRICS:
-        if k in metrics:
-            print(f"  {k}: {metrics[k]:.4f}")
+    for key, label in KEY_METRICS:
+        val = get_metric(metrics, key)
+        if val is not None:
+            print(f"  {label}: {val:.4f}")
 
     gc.collect()
     return {"name": name, "n_factors": exp["n_factors"], "success": True, "elapsed": round(elapsed, 1), **metrics}
@@ -218,13 +223,13 @@ def print_summary(results: list[dict]):
         if not r.get("success"):
             print(f"{r['name']:<18} FAILED")
             continue
-        ic = r.get("IC", float("nan"))
-        ric = r.get("Rank IC", float("nan"))
-        icir = r.get("ICIR", float("nan"))
-        ricir = r.get("Rank ICIR", float("nan"))
-        ir = r.get("1day.excess_return_with_cost.information_ratio", float("nan"))
-        ret = r.get("1day.excess_return_with_cost.annualized_return", float("nan"))
-        mdd = r.get("1day.excess_return_with_cost.max_drawdown", float("nan"))
+        ic = get_metric(r, "ic_mean", float("nan"))
+        ric = get_metric(r, "rank_ic_mean", float("nan"))
+        icir = get_metric(r, "ic_ir", float("nan"))
+        ricir = get_metric(r, "rank_ic_ir", float("nan"))
+        ir = get_metric(r, "information_ratio_with_cost", float("nan"))
+        ret = get_metric(r, "excess_return_annualized_with_cost", float("nan"))
+        mdd = get_metric(r, "max_drawdown_with_cost", float("nan"))
         t = r.get("elapsed", 0)
         print(f"{r['name']:<18} {r['n_factors']:>5d} {ic:>8.4f} {ric:>8.4f} {icir:>8.4f} {ricir:>8.4f} {ir:>9.4f} {ret:>10.4f} {mdd:>8.4f} {t:>5.0f}s")
 

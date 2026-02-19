@@ -40,6 +40,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from project_qlib.metrics_standard import canonicalize_metrics, get_metric
+
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -226,11 +228,12 @@ def compute_ic_metrics(pred: pd.Series, dataset) -> dict:
     rank_icir = daily_rank_ic.mean() / daily_rank_ic.std() if daily_rank_ic.std() > 0 else 0
 
     return {
-        "IC": round(float(ic_mean), 6),
-        "ICIR": round(float(icir), 4),
-        "Rank_IC": round(float(rank_ic_mean), 6),
-        "Rank_ICIR": round(float(rank_icir), 4),
+        "ic_mean": round(float(ic_mean), 6),
+        "ic_ir": round(float(icir), 4),
+        "rank_ic_mean": round(float(rank_ic_mean), 6),
+        "rank_ic_ir": round(float(rank_icir), 4),
         "n_days": int(len(daily_ic)),
+        "metric_schema_version": "v1",
     }
 
 
@@ -270,22 +273,23 @@ def run_backtest(pred: pd.Series, topk: int = 50, n_drop: int = 5,
     def _extract(analysis_df, label):
         risk = analysis_df["risk"]
         return {
-            f"ann_ret_{label}": round(float(risk.loc["annualized_return"]), 6),
-            f"IR_{label}": round(float(risk.loc["information_ratio"]), 4),
-            f"max_dd_{label}": round(float(risk.loc["max_drawdown"]), 6),
+            f"excess_return_annualized_{label}": round(float(risk.loc["annualized_return"]), 6),
+            f"information_ratio_{label}": round(float(risk.loc["information_ratio"]), 4),
+            f"max_drawdown_{label}": round(float(risk.loc["max_drawdown"]), 6),
         }
 
     metrics = {}
     metrics.update(_extract(analysis_no_cost, "no_cost"))
     metrics.update(_extract(analysis_with_cost, "with_cost"))
+    metrics["excess_return_daily_no_cost"] = round(float(excess_no_cost.mean()), 8)
+    metrics["excess_return_daily_with_cost"] = round(float(excess_with_cost.mean()), 8)
 
     # Turnover: daily cost / total portfolio value proxy
     total_cost = report["cost"].sum()
-    total_days = len(report)
     metrics["daily_turnover"] = round(float(report["turnover"].mean()), 6) if "turnover" in report.columns else None
     metrics["total_cost_pct"] = round(float(total_cost / ACCOUNT * 100), 4)
 
-    return metrics
+    return canonicalize_metrics(metrics, keep_unknown=True)
 
 
 # ─── Phase Runners ────────────────────────────────────────────────────────────
@@ -347,7 +351,10 @@ def phase2_label_horizon(quick: bool = False) -> list[dict]:
         pred = get_predictions(model, dataset)
         ic = compute_ic_metrics(pred, dataset)
         train_time = time.time() - t0
-        print(f"  Trained in {train_time:.1f}s. IC={ic['IC']:.4f}, RankIC={ic['Rank_IC']:.4f}")
+        print(
+            f"  Trained in {train_time:.1f}s. IC={ic['ic_mean']:.4f}, "
+            f"RankIC={ic['rank_ic_mean']:.4f}"
+        )
 
         # Test with hold_thresh=1, 10, and 20
         hold_values = [1, 10, 20] if not quick else [1, 20]
@@ -442,7 +449,10 @@ def phase4_loss_function(quick: bool = False) -> list[dict]:
         pred = get_predictions(model, dataset)
         ic = compute_ic_metrics(pred, dataset)
         train_time = time.time() - t0
-        print(f"  Trained in {train_time:.1f}s. IC={ic['IC']:.4f}, RankIC={ic['Rank_IC']:.4f}")
+        print(
+            f"  Trained in {train_time:.1f}s. IC={ic['ic_mean']:.4f}, "
+            f"RankIC={ic['rank_ic_mean']:.4f}"
+        )
 
         # Test with hold_thresh=1 and 20
         for hold in [1, 20]:
@@ -488,7 +498,7 @@ def phase5_model_ensemble(quick: bool = False) -> list[dict]:
     lgb_pred = get_predictions(lgb_model, dataset)
     lgb_time = time.time() - t0
     lgb_ic = compute_ic_metrics(lgb_pred, dataset)
-    print(f"  LGB done ({lgb_time:.1f}s): IC={lgb_ic['IC']:.4f}")
+    print(f"  LGB done ({lgb_time:.1f}s): IC={lgb_ic['ic_mean']:.4f}")
 
     # Train XGBoost
     print("  Training XGBoost...", flush=True)
@@ -497,7 +507,7 @@ def phase5_model_ensemble(quick: bool = False) -> list[dict]:
     xgb_pred = get_predictions(xgb_model, dataset)
     xgb_time = time.time() - t0
     xgb_ic = compute_ic_metrics(xgb_pred, dataset)
-    print(f"  XGB done ({xgb_time:.1f}s): IC={xgb_ic['IC']:.4f}")
+    print(f"  XGB done ({xgb_time:.1f}s): IC={xgb_ic['ic_mean']:.4f}")
 
     # XGBoost standalone
     for hold in [1, 20]:
@@ -534,7 +544,10 @@ def phase5_model_ensemble(quick: bool = False) -> list[dict]:
     ensemble_pred.name = "score"
 
     ensemble_ic = compute_ic_metrics(ensemble_pred, dataset)
-    print(f"  Ensemble IC={ensemble_ic['IC']:.4f}, RankIC={ensemble_ic['Rank_IC']:.4f}")
+    print(
+        f"  Ensemble IC={ensemble_ic['ic_mean']:.4f}, "
+        f"RankIC={ensemble_ic['rank_ic_mean']:.4f}"
+    )
 
     for hold in [1, 20]:
         bt = run_backtest(ensemble_pred, topk=50, n_drop=5, hold_thresh=hold)
@@ -566,11 +579,11 @@ def phase5_model_ensemble(quick: bool = False) -> list[dict]:
 def _print_result(result: dict):
     """Print one experiment result as a compact line."""
     name = result["experiment"]
-    ic = result.get("IC", float("nan"))
-    ric = result.get("Rank_IC", float("nan"))
-    ir_wc = result.get("IR_with_cost", float("nan"))
-    ret_wc = result.get("ann_ret_with_cost", float("nan"))
-    mdd_wc = result.get("max_dd_with_cost", float("nan"))
+    ic = get_metric(result, "ic_mean", float("nan"))
+    ric = get_metric(result, "rank_ic_mean", float("nan"))
+    ir_wc = get_metric(result, "information_ratio_with_cost", float("nan"))
+    ret_wc = get_metric(result, "excess_return_annualized_with_cost", float("nan"))
+    mdd_wc = get_metric(result, "max_drawdown_with_cost", float("nan"))
     print(f"    {name:<30s}  IC={ic:+.4f}  RkIC={ric:+.4f}  "
           f"IR(w/c)={ir_wc:+.3f}  Ret(w/c)={ret_wc:+.4f}  MaxDD={mdd_wc:+.4f}")
 
@@ -588,7 +601,11 @@ def print_full_comparison(all_results: list[dict]):
     print(header)
     print("-" * 140)
 
-    sorted_results = sorted(all_results, key=lambda x: x.get("IR_with_cost", -999), reverse=True)
+    sorted_results = sorted(
+        all_results,
+        key=lambda x: get_metric(x, "information_ratio_with_cost", -999),
+        reverse=True,
+    )
     for i, r in enumerate(sorted_results, 1):
         name = r["experiment"]
         phase = r["phase"]
@@ -597,12 +614,12 @@ def print_full_comparison(all_results: list[dict]):
         topk = r.get("topk", 50)
         n_drop = r.get("n_drop", 5)
         hold = r.get("hold_thresh", 1)
-        ic = r.get("IC", float("nan"))
-        ric = r.get("Rank_IC", float("nan"))
-        icir = r.get("ICIR", float("nan"))
-        ir = r.get("IR_with_cost", float("nan"))
-        ret = r.get("ann_ret_with_cost", float("nan"))
-        mdd = r.get("max_dd_with_cost", float("nan"))
+        ic = get_metric(r, "ic_mean", float("nan"))
+        ric = get_metric(r, "rank_ic_mean", float("nan"))
+        icir = get_metric(r, "ic_ir", float("nan"))
+        ir = get_metric(r, "information_ratio_with_cost", float("nan"))
+        ret = get_metric(r, "excess_return_annualized_with_cost", float("nan"))
+        mdd = get_metric(r, "max_drawdown_with_cost", float("nan"))
 
         marker = " ***" if i <= 3 else ""
         print(f"{i:<3} {name:<35} {phase:>5} {label:>5}d {loss:>6} "
@@ -615,9 +632,9 @@ def print_full_comparison(all_results: list[dict]):
     print(f"\n  BEST CONFIG: {best['experiment']}")
     print(f"    Phase {best['phase']} | label={best.get('label_days',1)}d | loss={best.get('loss','mse')} | "
           f"topk={best.get('topk',50)} | n_drop={best.get('n_drop',5)} | hold_thresh={best.get('hold_thresh',1)}")
-    print(f"    IR(with cost)={best.get('IR_with_cost', 0):+.4f} | "
-          f"Return(with cost)={best.get('ann_ret_with_cost', 0):+.4f} | "
-          f"MaxDD={best.get('max_dd_with_cost', 0):+.4f}")
+    print(f"    IR(with cost)={get_metric(best, 'information_ratio_with_cost', 0):+.4f} | "
+          f"Return(with cost)={get_metric(best, 'excess_return_annualized_with_cost', 0):+.4f} | "
+          f"MaxDD={get_metric(best, 'max_drawdown_with_cost', 0):+.4f}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -665,8 +682,10 @@ def main():
         ic_metrics = compute_ic_metrics(pred, dataset)
         baseline_time = time.time() - t0
         print(f"  Baseline trained in {baseline_time:.1f}s")
-        print(f"  IC={ic_metrics['IC']:.4f}, RankIC={ic_metrics['Rank_IC']:.4f}, "
-              f"ICIR={ic_metrics['ICIR']:.4f}, RankICIR={ic_metrics['Rank_ICIR']:.4f}")
+        print(
+            f"  IC={ic_metrics['ic_mean']:.4f}, RankIC={ic_metrics['rank_ic_mean']:.4f}, "
+            f"ICIR={ic_metrics['ic_ir']:.4f}, RankICIR={ic_metrics['rank_ic_ir']:.4f}"
+        )
 
         # Add baseline result (hold=1, topk=50, n_drop=5)
         bt_baseline = run_backtest(pred, topk=50, n_drop=5, hold_thresh=1)

@@ -28,6 +28,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from project_qlib.metrics_standard import canonicalize_metrics
 from project_qlib.runtime import init_qlib
 from project_qlib.workflow import run_qrun
 
@@ -110,7 +111,7 @@ def parse_results(log_path: str) -> dict:
     if bench:
         metrics["bench_ann_return"] = float(bench.group(1))
 
-    return metrics
+    return canonicalize_metrics(metrics, keep_unknown=True)
 
 
 def main():
@@ -137,8 +138,22 @@ def main():
     baseline_metrics = results.get("baseline_alpha158", {}).get("metrics", {})
     hea_metrics = results.get("sfa_top_factors", {}).get("metrics", {})
 
+    key_order = [
+        "ic_mean",
+        "ic_ir",
+        "rank_ic_mean",
+        "rank_ic_ir",
+        "excess_return_annualized_no_cost",
+        "information_ratio_no_cost",
+        "max_drawdown_no_cost",
+        "excess_return_annualized_with_cost",
+        "information_ratio_with_cost",
+        "max_drawdown_with_cost",
+        "benchmark_return_annualized",
+    ]
     all_keys = sorted(set(list(baseline_metrics.keys()) + list(hea_metrics.keys())))
-    for key in all_keys:
+    ordered_keys = [k for k in key_order if k in all_keys] + [k for k in all_keys if k not in key_order]
+    for key in ordered_keys:
         bv = baseline_metrics.get(key)
         hv = hea_metrics.get(key)
         bv_str = f"{bv:.6f}" if bv is not None else "N/A"

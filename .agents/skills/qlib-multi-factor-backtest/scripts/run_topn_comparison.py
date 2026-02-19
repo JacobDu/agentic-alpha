@@ -37,6 +37,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from project_qlib.metrics_standard import canonicalize_metrics, get_metric
 from project_qlib.workflow import run_qrun
 
 
@@ -242,7 +243,7 @@ def parse_metrics(log_path: str) -> dict:
     if feat_m:
         metrics["n_features"] = int(feat_m.group(1))
 
-    return metrics
+    return canonicalize_metrics(metrics, keep_unknown=True)
 
 
 def print_comparison(results: dict):
@@ -280,20 +281,20 @@ def print_comparison(results: dict):
 
     metric_groups = [
         ("Signal Quality", [
-            ("IC", "IC (mean)"),
-            ("ICIR", "ICIR"),
-            ("Rank_IC", "Rank IC (mean)"),
-            ("Rank_ICIR", "Rank ICIR"),
+            ("ic_mean", "IC (mean)"),
+            ("ic_ir", "ICIR"),
+            ("rank_ic_mean", "Rank IC (mean)"),
+            ("rank_ic_ir", "Rank ICIR"),
         ]),
         ("Portfolio (no cost)", [
-            ("excess_ann_ret_no_cost", "Excess Ann Ret"),
-            ("IR_no_cost", "IR"),
-            ("max_dd_no_cost", "Max Drawdown"),
+            ("excess_return_annualized_no_cost", "Excess Ann Ret"),
+            ("information_ratio_no_cost", "IR"),
+            ("max_drawdown_no_cost", "Max Drawdown"),
         ]),
         ("Portfolio (with cost)", [
-            ("excess_ann_ret_with_cost", "Excess Ann Ret"),
-            ("IR_with_cost", "IR"),
-            ("max_dd_with_cost", "Max Drawdown"),
+            ("excess_return_annualized_with_cost", "Excess Ann Ret"),
+            ("information_ratio_with_cost", "IR"),
+            ("max_drawdown_with_cost", "Max Drawdown"),
         ]),
     ]
 
@@ -317,7 +318,7 @@ def print_comparison(results: dict):
     best_name = None
     best_ir = -999
     for name, r in results.items():
-        ir = r.get("metrics", {}).get("IR_with_cost")
+        ir = get_metric(r.get("metrics", {}), "information_ratio_with_cost")
         if ir is not None and ir > best_ir:
             best_ir = ir
             best_name = name

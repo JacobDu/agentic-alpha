@@ -27,6 +27,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from project_qlib.metrics_standard import canonicalize_metrics, get_metric
 from project_qlib.runtime import PROJECT_ROOT, init_qlib
 from project_qlib.workflow import run_qrun
 
@@ -163,20 +164,26 @@ def main():
         print(f"  Baseline: {'OK' if result['success'] else 'FAILED'} ({elapsed:.0f}s)")
         if not result['success']:
             print(f"  Error: {result['error_tail'][:500]}")
-        metrics = read_mlflow_metrics()
+        metrics = canonicalize_metrics(read_mlflow_metrics(), keep_unknown=True)
         results["baseline_158"] = {
             "n_factors": 158,
             "success": result["success"],
             "elapsed": round(elapsed, 1),
             **metrics,
         }
-        key_names = ["IC", "ICIR", "Rank IC", "Rank ICIR",
-                     "1day.excess_return_with_cost.annualized_return",
-                     "1day.excess_return_with_cost.information_ratio"]
+        key_names = [
+            "ic_mean",
+            "ic_ir",
+            "rank_ic_mean",
+            "rank_ic_ir",
+            "excess_return_annualized_with_cost",
+            "information_ratio_with_cost",
+        ]
         print(f"  Run ID: {metrics.get('run_id', 'N/A')}")
         for k in key_names:
-            if k in metrics:
-                print(f"  {k}: {metrics[k]:.4f}")
+            v = get_metric(metrics, k)
+            if v is not None:
+                print(f"  {k}: {v:.4f}")
         gc.collect()
 
     # Step 2: TopN experiments
@@ -196,20 +203,26 @@ def main():
         if not result['success']:
             print(f"  Error: {result['error_tail'][:500]}")
 
-        metrics = read_mlflow_metrics()
+        metrics = canonicalize_metrics(read_mlflow_metrics(), keep_unknown=True)
         results[f"topn_{n}"] = {
             "n_factors": n,
             "success": result["success"],
             "elapsed": round(elapsed, 1),
             **metrics,
         }
-        key_names = ["IC", "ICIR", "Rank IC", "Rank ICIR",
-                     "1day.excess_return_with_cost.annualized_return",
-                     "1day.excess_return_with_cost.information_ratio"]
+        key_names = [
+            "ic_mean",
+            "ic_ir",
+            "rank_ic_mean",
+            "rank_ic_ir",
+            "excess_return_annualized_with_cost",
+            "information_ratio_with_cost",
+        ]
         print(f"  Run ID: {metrics.get('run_id', 'N/A')}")
         for k in key_names:
-            if k in metrics:
-                print(f"  {k}: {metrics[k]:.4f}")
+            v = get_metric(metrics, k)
+            if v is not None:
+                print(f"  {k}: {v:.4f}")
         gc.collect()
 
     # Step 3: Summary
@@ -223,12 +236,12 @@ def main():
         if not r.get("success"):
             print(f"{name:<20} {'FAILED':>8}")
             continue
-        ic = r.get("IC", float("nan"))
-        ric = r.get("Rank IC", float("nan"))
-        icir = r.get("ICIR", float("nan"))
-        ricir = r.get("Rank ICIR", float("nan"))
-        ir_wc = r.get("1day.excess_return_with_cost.information_ratio", float("nan"))
-        ret_wc = r.get("1day.excess_return_with_cost.annualized_return", float("nan"))
+        ic = get_metric(r, "ic_mean", float("nan"))
+        ric = get_metric(r, "rank_ic_mean", float("nan"))
+        icir = get_metric(r, "ic_ir", float("nan"))
+        ricir = get_metric(r, "rank_ic_ir", float("nan"))
+        ir_wc = get_metric(r, "information_ratio_with_cost", float("nan"))
+        ret_wc = get_metric(r, "excess_return_annualized_with_cost", float("nan"))
         t = r.get("elapsed", 0)
         print(f"{name:<20} {r['n_factors']:>8d} {ic:>8.4f} {ric:>8.4f} {icir:>8.4f} {ricir:>9.4f} {ir_wc:>11.4f} {ret_wc:>12.4f} {t:>5.0f}s")
 
