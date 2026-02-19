@@ -1,11 +1,20 @@
-"""Check available data fields and date range."""
-import sys
-import multiprocessing
-from pathlib import Path
+"""Reusable Qlib data availability and coverage checker.
 
-if "--help" in sys.argv or "-h" in sys.argv:
-    print("Usage: uv run python .agents/skills/qlib-env-data-prep/scripts/check_data.py")
-    raise SystemExit(0)
+Checks:
+1. Base price/volume fields availability.
+2. Optional financial fields availability.
+3. Date range coverage for one sample instrument.
+4. Market universe coverage on an as-of date.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import multiprocessing
+import sys
+from pathlib import Path
+from typing import Any
+
 
 def _find_project_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
@@ -15,65 +24,203 @@ def _find_project_root(start: Path) -> Path:
 
 
 PROJECT_ROOT = _find_project_root(Path(__file__).resolve())
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-if __name__ == "__main__":
-    multiprocessing.set_start_method("fork", force=True)
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from project_qlib.runtime import init_qlib
-init_qlib()
 from qlib.data import D
 
-# Check available fields
-print("=== Available Fields ===")
-fields = ["close", "open", "high", "low", "volume", "vwap", "amount", "change", "factor", "adjclose"]
-for f in fields:
-    try:
-        df = D.features(["sh600000"], [f"${f}"], start_time="2026-02-10", end_time="2026-02-13")
-        if len(df) > 0:
-            print(f"  ${f}: {len(df)} rows, last={df.iloc[-1,0]:.4f}")
-        else:
-            print(f"  ${f}: empty")
-    except Exception as e:
-        print(f"  ${f}: ERROR {e}")
+DEFAULT_BASE_FIELDS = [
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "vwap",
+    "amount",
+    "change",
+    "factor",
+    "adjclose",
+]
 
-# Date range
-print("\n=== Date Range (sh600000) ===")
-df = D.features(["sh600000"], ["$close"], start_time="2000-01-01", end_time="2030-12-31")
-dates = df.index.get_level_values(1)
-print(f"  Start: {dates.min()}")
-print(f"  End: {dates.max()}")
-print(f"  Total days: {len(dates)}")
+DEFAULT_FINANCIAL_FIELDS = [
+    "pe",
+    "pb",
+    "ps",
+    "pcf",
+    "market_cap",
+    "total_mv",
+    "circ_mv",
+    "turnover_rate",
+    "pe_ttm",
+    "eps",
+    "roe",
+    "roa",
+    "bps",
+]
 
-# 2026 data
-df26 = D.features(["sh600000"], ["$close"], start_time="2026-01-01", end_time="2026-12-31")
-print(f"\n  2026: {len(df26)} days")
-if len(df26) > 0:
-    d26 = df26.index.get_level_values(1)
-    print(f"  2026 range: {d26.min()} ~ {d26.max()}")
 
-# Check for financial data fields (common: pe, pb, ps, etc.)
-print("\n=== Testing Financial Fields ===")
-fin_fields = ["pe", "pb", "ps", "pcf", "market_cap", "total_mv", "circ_mv",
-              "turnover_rate", "pe_ttm", "eps", "roe", "roa", "bps"]
-for f in fin_fields:
-    try:
-        df = D.features(["sh600000"], [f"${f}"], start_time="2025-01-01", end_time="2026-02-13")
-        if len(df) > 0 and df.iloc[:, 0].notna().any():
-            print(f"  ${f}: OK ({df.iloc[:, 0].notna().sum()} non-null)")
-        else:
-            print(f"  ${f}: all NaN or empty")
-    except Exception as e:
-        print(f"  ${f}: NOT AVAILABLE")
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
-# Market coverage
-if __name__ == "__main__":
-    print("\n=== Market Coverage ===")
-    for market in ["csi300", "csi500", "csi1000", "csiall"]:
+
+def _check_fields(instrument: str, fields: list[str], start: str, end: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for field in fields:
+        item: dict[str, Any] = {"field": field, "ok": False, "rows": 0}
         try:
-            inst = D.instruments(market)
-            df = D.features(inst, ["$close"], start_time="2026-02-13", end_time="2026-02-13")
-            print(f"  {market}: {len(df)} stocks on 2026-02-13")
-        except Exception as e:
-            err = str(e).split("\n")[0]
-            print(f"  {market}: ERROR {err}")
+            df = D.features([instrument], [f"${field}"], start_time=start, end_time=end)
+            item["rows"] = int(len(df))
+            if len(df) > 0:
+                non_null = int(df.iloc[:, 0].notna().sum())
+                item["non_null"] = non_null
+                item["ok"] = non_null > 0
+                if non_null > 0:
+                    item["last_value"] = float(df.iloc[:, 0].dropna().iloc[-1])
+            else:
+                item["non_null"] = 0
+        except Exception as exc:
+            item["error"] = str(exc)
+        rows.append(item)
+    return rows
+
+
+def _check_date_range(instrument: str, start: str, end: str) -> dict[str, Any]:
+    try:
+        df = D.features([instrument], ["$close"], start_time=start, end_time=end)
+        if len(df) == 0:
+            return {"ok": False, "rows": 0}
+        dates = df.index.get_level_values("datetime")
+        return {
+            "ok": True,
+            "rows": int(len(df)),
+            "start": str(dates.min()),
+            "end": str(dates.max()),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _check_market_coverage(markets: list[str], asof_date: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for market in markets:
+        item: dict[str, Any] = {"market": market, "ok": False, "asof_date": asof_date}
+        try:
+            instruments = D.instruments(market)
+            df = D.features(instruments, ["$close"], start_time=asof_date, end_time=asof_date)
+            item["rows"] = int(len(df))
+            item["ok"] = len(df) > 0
+        except Exception as exc:
+            item["error"] = str(exc).split("\n")[0]
+        rows.append(item)
+    return rows
+
+
+def _render_console(report: dict[str, Any]) -> None:
+    print("=== Data Field Check ===")
+    print(f"Sample instrument: {report['sample_instrument']}")
+    print(f"Field window: {report['field_window']['start']} ~ {report['field_window']['end']}")
+
+    print("\n[Base Fields]")
+    for row in report["base_fields"]:
+        if row.get("ok"):
+            print(
+                f"  - ${row['field']}: ok rows={row.get('rows', 0)} "
+                f"non_null={row.get('non_null', 0)}"
+            )
+        else:
+            err = row.get("error") or "empty/all NaN"
+            print(f"  - ${row['field']}: fail ({err})")
+
+    if report.get("financial_fields") is not None:
+        print("\n[Financial Fields]")
+        for row in report["financial_fields"]:
+            if row.get("ok"):
+                print(
+                    f"  - ${row['field']}: ok rows={row.get('rows', 0)} "
+                    f"non_null={row.get('non_null', 0)}"
+                )
+            else:
+                err = row.get("error") or "empty/all NaN"
+                print(f"  - ${row['field']}: fail ({err})")
+
+    print("\n[Date Range]")
+    dr = report["date_range"]
+    if dr.get("ok"):
+        print(f"  - rows={dr.get('rows')} start={dr.get('start')} end={dr.get('end')}")
+    else:
+        print(f"  - fail ({dr.get('error', 'empty')})")
+
+    print("\n[Market Coverage]")
+    for row in report["market_coverage"]:
+        if row.get("ok"):
+            print(f"  - {row['market']}: ok stocks={row.get('rows', 0)} on {row['asof_date']}")
+        else:
+            print(f"  - {row['market']}: fail ({row.get('error', 'empty')})")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check Qlib data availability and coverage")
+    parser.add_argument("--sample-instrument", default="sh600000")
+    parser.add_argument("--field-start", default="2020-01-01")
+    parser.add_argument("--field-end", default="2025-12-31")
+    parser.add_argument("--range-start", default="2000-01-01")
+    parser.add_argument("--range-end", default="2030-12-31")
+    parser.add_argument("--asof-date", help="Date for market coverage check; default uses --field-end")
+    parser.add_argument("--base-fields", default=",".join(DEFAULT_BASE_FIELDS))
+    parser.add_argument("--financial-fields", default=",".join(DEFAULT_FINANCIAL_FIELDS))
+    parser.add_argument("--skip-financial", action="store_true")
+    parser.add_argument("--markets", default="csi300,csi500,csi1000,csiall")
+    parser.add_argument("--output-json", help="Optional path to save JSON report")
+    args = parser.parse_args()
+
+    multiprocessing.set_start_method("fork", force=True)
+    init_qlib()
+
+    base_fields = _split_csv(args.base_fields)
+    financial_fields = _split_csv(args.financial_fields)
+    markets = _split_csv(args.markets)
+    asof_date = args.asof_date or args.field_end
+
+    report: dict[str, Any] = {
+        "sample_instrument": args.sample_instrument,
+        "field_window": {"start": args.field_start, "end": args.field_end},
+        "date_range_window": {"start": args.range_start, "end": args.range_end},
+        "base_fields": _check_fields(args.sample_instrument, base_fields, args.field_start, args.field_end),
+        "date_range": _check_date_range(args.sample_instrument, args.range_start, args.range_end),
+        "market_coverage": _check_market_coverage(markets, asof_date),
+    }
+
+    if args.skip_financial:
+        report["financial_fields"] = None
+    else:
+        report["financial_fields"] = _check_fields(
+            args.sample_instrument,
+            financial_fields,
+            args.field_start,
+            args.field_end,
+        )
+
+    _render_console(report)
+
+    if args.output_json:
+        output = Path(args.output_json)
+    else:
+        output = PROJECT_ROOT / "outputs" / "data_check_report.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n[OK] Report written: {output}")
+
+    base_ok = all(row.get("ok") for row in report["base_fields"])
+    date_ok = bool(report["date_range"].get("ok"))
+    market_ok = all(row.get("ok") for row in report["market_coverage"])
+    fin_ok = True
+    if report["financial_fields"] is not None:
+        fin_ok = all(row.get("ok") for row in report["financial_fields"])
+
+    return 0 if (base_ok and date_ok and market_ok and fin_ok) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

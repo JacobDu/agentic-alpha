@@ -7,47 +7,46 @@
 - owner: <agent/user>
 - market: csi1000
 
-## portfolio_hypothesis
+## retrieve
+- pool_source_query: <factor_db_cli query>
+- stable_pool_query: <factor_db_cli query>
+- memory_refs:
+  - AGENTS.md#推荐方向
+  - AGENTS.md#禁止方向
+
+## generate
 - hypothesis: <组合策略假设>
 - market_logic: <组合为何有效>
 - expected_direction: <超额/IR/回撤方向预期>
-
-## factor_pool_source
-- source_query: <factor_db_cli 查询或固定清单>
-- n_factors: <int>
+- model_families:
+  - linear: <lasso/linear-weight/...>
+  - nonlinear: <lgb/xgb/...>
 - factor_pool_notes: <筛选规则>
 
-## preflight_gate
-- parse_ok: pass/fail
-- complexity_level: low/medium/high
-- redundancy_flag: low/medium/high
-- data_availability: pass/fail
-- gate_notes: <异常与修复建议>
-
-## experiment_config
+## evaluate
 - script: .agents/skills/qlib-multi-factor-backtest/scripts/<script>.py
 - start: YYYY-MM-DD
 - end: YYYY-MM-DD
 - run_id: <mlflow_run_id or N/A>
 - output_paths:
   - outputs/...
-
-## multi_factor_metrics
 - executed: yes/no
 - not_run_reason: <若未执行必填>
 - excess_return_with_cost: <float>
 - ir_with_cost: <float>
 - max_drawdown: <float>
+- stress_test_notes: <成本/参数压力测试结果>
 - mfa_result: pass/fail/not_run
 
-## decision
+## distill_decision
 - decision: Promote/Iterate/Drop
 - decision_basis: <必须引用多因子指标 + 门控结果>
 - failure_mode: <若 Iterate/Drop 必填>
 - next_action: <下一轮动作>
 
-## evidence_links
+## distill_evidence
 - db_query: <factor_db_cli 命令或结果键>
 - run_id: <mlflow run id>
 - outputs:
   - outputs/...
+- doc: docs/workflows/multi-factor/MFA-YYYY-MM-DD-XX.md

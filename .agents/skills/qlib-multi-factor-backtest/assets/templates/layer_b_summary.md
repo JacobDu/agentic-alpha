@@ -1,4 +1,4 @@
-# Layer B 结果摘要
+# MFA 结果摘要（legacy filename）
 
 - strategy:
 - market:

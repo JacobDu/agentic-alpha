@@ -1,4 +1,4 @@
-"""HEA: Design & test new candidate factors on CSI1000.
+"""Design and test new candidate factors on CSI1000.
 
 This script tests a batch of newly designed factors, computes Rank IC with
 FDR correction, and backfills results into the factor library.
@@ -158,8 +158,10 @@ def main():
     parser = argparse.ArgumentParser(description="Test new candidate factors")
     parser.add_argument("--market", default="csi1000", help="Market (default: csi1000)")
     parser.add_argument("--start", default="2019-01-01", help="Test start date")
-    parser.add_argument("--end", default="2026-02-13", help="Test end date")
+    parser.add_argument("--end", default="2025-12-31", help="Test end date")
     parser.add_argument("--backfill", action="store_true", help="Write results to factor library")
+    parser.add_argument("--round-id", default="SFA-BATCH-NEW", help="Round id written to DB (hea_round compatibility field)")
+    parser.add_argument("--source-tag", default="Custom", help="Factor source tag when backfilling")
     args = parser.parse_args()
 
     init_qlib()
@@ -282,7 +284,7 @@ def main():
                 name=name,
                 expression=expr,
                 category=cat,
-                source="Custom",
+                source=args.source_tag,
                 status="Candidate",
             )
 
@@ -304,6 +306,7 @@ def main():
                     rank_icir=row.get("rank_icir"),
                     fdr_p=row.get("fdr_p"),
                     significant=sig,
+                    hea_round=args.round_id,
                 )
 
                 # Update status based on significance

@@ -81,10 +81,45 @@ CREATE TABLE IF NOT EXISTS workflow_evidence (
     FOREIGN KEY (round_id) REFERENCES workflow_runs(round_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS factor_similarity (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    factor_a         TEXT NOT NULL,
+    factor_b         TEXT NOT NULL,
+    market           TEXT NOT NULL,
+    window           TEXT NOT NULL,
+    rho_mean_abs     REAL NOT NULL,
+    rho_p95_abs      REAL,
+    sample_days      INTEGER,
+    source_round_id  TEXT,
+    notes            TEXT,
+    calculated_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(factor_a, factor_b, market, window)
+);
+
+CREATE TABLE IF NOT EXISTS factor_replacements (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_factor       TEXT NOT NULL,
+    new_factor       TEXT NOT NULL,
+    market           TEXT NOT NULL,
+    reason           TEXT,
+    corr_value       REAL,
+    old_icir         REAL,
+    new_icir         REAL,
+    improve_ratio    REAL,
+    decided_in_round TEXT,
+    created_at       TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_type_date ON workflow_runs(round_type, date DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_market ON workflow_runs(market);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_decision ON workflow_decisions(decision);
 CREATE INDEX IF NOT EXISTS idx_workflow_evidence_round ON workflow_evidence(round_id);
+CREATE INDEX IF NOT EXISTS idx_factor_similarity_market ON factor_similarity(market, window);
+CREATE INDEX IF NOT EXISTS idx_factor_similarity_factor_a ON factor_similarity(factor_a);
+CREATE INDEX IF NOT EXISTS idx_factor_similarity_factor_b ON factor_similarity(factor_b);
+CREATE INDEX IF NOT EXISTS idx_factor_replacements_market ON factor_replacements(market, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_factor_replacements_old ON factor_replacements(old_factor);
+CREATE INDEX IF NOT EXISTS idx_factor_replacements_new ON factor_replacements(new_factor);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_evidence_unique
     ON workflow_evidence(round_id, evidence_type, evidence_value);
 
@@ -419,6 +454,174 @@ class WorkflowDB:
         self._conn.execute("DELETE FROM workflow_evidence WHERE round_id = ?", (round_id,))
         self._conn.commit()
 
+    @staticmethod
+    def _normalize_pair(factor_a: str, factor_b: str) -> tuple[str, str]:
+        fa = factor_a.strip()
+        fb = factor_b.strip()
+        if not fa or not fb:
+            raise ValueError("factor_a and factor_b must be non-empty")
+        if fa == fb:
+            raise ValueError("factor_a and factor_b must be different")
+        return (fa, fb) if fa < fb else (fb, fa)
+
+    def upsert_similarity(
+        self,
+        *,
+        factor_a: str,
+        factor_b: str,
+        market: str,
+        window: str,
+        rho_mean_abs: float,
+        rho_p95_abs: float | None = None,
+        sample_days: int | None = None,
+        source_round_id: str | None = None,
+        notes: str | None = None,
+        calculated_at: str | None = None,
+    ) -> None:
+        fa, fb = self._normalize_pair(factor_a, factor_b)
+        self._conn.execute(
+            """INSERT INTO factor_similarity
+               (factor_a, factor_b, market, window, rho_mean_abs, rho_p95_abs,
+                sample_days, source_round_id, notes, calculated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')))
+               ON CONFLICT(factor_a, factor_b, market, window)
+               DO UPDATE SET
+                 rho_mean_abs=excluded.rho_mean_abs,
+                 rho_p95_abs=excluded.rho_p95_abs,
+                 sample_days=excluded.sample_days,
+                 source_round_id=excluded.source_round_id,
+                 notes=excluded.notes,
+                 calculated_at=excluded.calculated_at
+            """,
+            (
+                fa,
+                fb,
+                market,
+                window,
+                rho_mean_abs,
+                rho_p95_abs,
+                sample_days,
+                source_round_id,
+                notes,
+                calculated_at,
+            ),
+        )
+        self._conn.commit()
+
+    def list_similarity(
+        self,
+        *,
+        factor: str | None = None,
+        market: str | None = None,
+        window: str | None = None,
+        min_rho: float | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM factor_similarity WHERE 1=1"
+        params: list[Any] = []
+        if factor:
+            query += " AND (factor_a = ? OR factor_b = ?)"
+            params.extend([factor, factor])
+        if market:
+            query += " AND market = ?"
+            params.append(market)
+        if window:
+            query += " AND window = ?"
+            params.append(window)
+        if min_rho is not None:
+            query += " AND rho_mean_abs >= ?"
+            params.append(min_rho)
+        query += " ORDER BY rho_mean_abs DESC, calculated_at DESC"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _replacement_gate(corr_value: float, old_icir: float, new_icir: float) -> tuple[bool, float]:
+        old_abs = abs(old_icir)
+        new_abs = abs(new_icir)
+        if old_abs > 0:
+            improve_ratio = (new_abs - old_abs) / old_abs
+        else:
+            improve_ratio = float("inf") if new_abs > 0 else 0.0
+        passed = corr_value > 0.80 and improve_ratio >= 0.20
+        return passed, improve_ratio
+
+    def record_replacement(
+        self,
+        *,
+        old_factor: str,
+        new_factor: str,
+        market: str,
+        corr_value: float,
+        old_icir: float,
+        new_icir: float,
+        decided_in_round: str | None = None,
+        reason: str | None = None,
+        created_at: str | None = None,
+        enforce_gate: bool = True,
+    ) -> dict[str, Any]:
+        if old_factor.strip() == new_factor.strip():
+            raise ValueError("old_factor and new_factor must be different")
+        passed, improve_ratio = self._replacement_gate(corr_value, old_icir, new_icir)
+        if enforce_gate and not passed:
+            raise ValueError(
+                "replacement gate failed: requires corr_value > 0.80 and ICIR improvement >= 20%"
+            )
+
+        self._conn.execute(
+            """INSERT INTO factor_replacements
+               (old_factor, new_factor, market, reason, corr_value,
+                old_icir, new_icir, improve_ratio, decided_in_round, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')))
+            """,
+            (
+                old_factor,
+                new_factor,
+                market,
+                reason,
+                corr_value,
+                old_icir,
+                new_icir,
+                improve_ratio,
+                decided_in_round,
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        return {
+            "passed": passed,
+            "corr_value": corr_value,
+            "old_icir": old_icir,
+            "new_icir": new_icir,
+            "improve_ratio": improve_ratio,
+            "decided_in_round": decided_in_round,
+        }
+
+    def list_replacements(
+        self,
+        *,
+        market: str | None = None,
+        factor: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM factor_replacements WHERE 1=1"
+        params: list[Any] = []
+        if market:
+            query += " AND market = ?"
+            params.append(market)
+        if factor:
+            query += " AND (old_factor = ? OR new_factor = ?)"
+            params.extend([factor, factor])
+        query += " ORDER BY created_at DESC, id DESC"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
     def list_runs(
         self,
         *,
@@ -500,6 +703,19 @@ class WorkflowDB:
         if executed_val is not None:
             executed_text = "yes" if int(executed_val) == 1 else "no"
 
+        by_type: dict[str, list[str]] = {}
+        for item in evidence:
+            key = str(item.get("evidence_type") or "")
+            val = str(item.get("evidence_value") or "").strip()
+            if not key or not val:
+                continue
+            by_type.setdefault(key, []).append(val)
+
+        output_paths = by_type.get("output_path", [])
+        db_queries = by_type.get("db_query", [])
+        run_ids = by_type.get("run_id", [])
+        doc_paths = by_type.get("doc", [])
+
         lines = [
             f"# {run['round_id']}",
             "",
@@ -510,19 +726,25 @@ class WorkflowDB:
             f"- owner: {_fmt(run.get('owner'))}",
             f"- market: {_fmt(run.get('market'))}",
             "",
+            "## retrieve",
+            "- memory_refs:",
+            "  - AGENTS.md#推荐方向",
+            "  - AGENTS.md#禁止方向",
+            f"- db_snapshot_query: {_fmt(db_queries[0] if db_queries else None)}",
+            f"- similarity_snapshot_query: {_fmt(db_queries[1] if len(db_queries) > 1 else None)}",
+            "",
         ]
 
         if run.get("round_type") == "mfa":
             lines.extend(
                 [
-                    "## portfolio_hypothesis",
+                    "## generate",
                     f"- hypothesis: {_fmt(run.get('hypothesis'))}",
                     f"- market_logic: {_fmt(run.get('market_logic'))}",
                     f"- expected_direction: {_fmt(run.get('expected_direction'))}",
-                    "",
-                    "## factor_pool_source",
-                    "- source_query: N/A",
-                    "- n_factors: N/A",
+                    "- model_families:",
+                    "  - linear: N/A",
+                    "  - nonlinear: N/A",
                     "- factor_pool_notes: N/A",
                     "",
                 ]
@@ -530,44 +752,49 @@ class WorkflowDB:
         else:
             lines.extend(
                 [
-                    "## hypothesis",
+                    "## generate",
                     f"- hypothesis: {_fmt(run.get('hypothesis'))}",
                     f"- market_logic: {_fmt(run.get('market_logic'))}",
                     f"- expected_direction: {_fmt(run.get('expected_direction'))}",
-                    "",
-                    "## factor_expression_list",
-                    "- factor_1: N/A",
+                    "- factor_expression_list:",
+                    "  - factor_1: N/A",
                     "",
                 ]
             )
 
         lines.extend(
             [
-                "## preflight_gate",
+                "## evaluate_preflight",
                 f"- parse_ok: {_fmt(run.get('parse_ok'))}",
                 f"- complexity_level: {_fmt(run.get('complexity_level'))}",
                 f"- redundancy_flag: {_fmt(run.get('redundancy_flag'))}",
                 f"- data_availability: {_fmt(run.get('data_availability'))}",
                 f"- gate_notes: {_fmt(run.get('gate_notes'))}",
                 "",
-                "## experiment_config",
+                "## evaluate_metrics",
                 f"- script: {_fmt(run.get('script_path'))}",
                 f"- start: {_fmt(run.get('test_start'))}",
                 f"- end: {_fmt(run.get('test_end'))}",
-                f"- run_id: {_fmt(run.get('run_id'))}",
-                "",
+                f"- run_id: {_fmt(run.get('run_id') or (run_ids[0] if run_ids else None))}",
+                "- output_paths:",
             ]
         )
+        if output_paths:
+            for p in output_paths:
+                lines.append(f"  - {p}")
+        else:
+            lines.append("  - N/A")
+        lines.append("")
 
         if run.get("round_type") == "mfa":
             lines.extend(
                 [
-                    "## multi_factor_metrics",
                     f"- executed: {executed_text}",
                     f"- not_run_reason: {_fmt(mfa_metrics.get('not_run_reason'))}",
                     f"- excess_return_with_cost: {_fmt(mfa_metrics.get('excess_return_with_cost'))}",
                     f"- ir_with_cost: {_fmt(mfa_metrics.get('ir_with_cost'))}",
                     f"- max_drawdown: {_fmt(mfa_metrics.get('max_drawdown'))}",
+                    "- stress_test_notes: N/A",
                     f"- mfa_result: {_fmt(mfa_metrics.get('mfa_result'))}",
                     "",
                 ]
@@ -575,12 +802,12 @@ class WorkflowDB:
         else:
             lines.extend(
                 [
-                    "## single_factor_metrics",
                     f"- rank_ic_mean: {_fmt(sfa_metrics.get('rank_ic_mean'))}",
                     f"- rank_ic_t: {_fmt(sfa_metrics.get('rank_ic_t'))}",
                     f"- fdr_p: {_fmt(sfa_metrics.get('fdr_p'))}",
                     f"- rank_icir: {_fmt(sfa_metrics.get('rank_icir'))}",
                     f"- n_days: {_fmt(sfa_metrics.get('n_days'))}",
+                    "- max_rho_abs: N/A",
                     f"- sfa_result: {_fmt(sfa_metrics.get('sfa_result'))}",
                     "",
                 ]
@@ -588,21 +815,24 @@ class WorkflowDB:
 
         lines.extend(
             [
-                "## decision",
+                "## distill_decision",
                 f"- decision: {_fmt(decision.get('decision'))}",
                 f"- decision_basis: {_fmt(decision.get('decision_basis'))}",
                 f"- failure_mode: {_fmt(decision.get('failure_mode'))}",
                 f"- next_action: {_fmt(decision.get('next_action'))}",
                 "",
-                "## evidence_links",
+                "## distill_evidence",
+                f"- db_query: {_fmt(db_queries[0] if db_queries else None)}",
+                f"- run_id: {_fmt(run.get('run_id') or (run_ids[0] if run_ids else None))}",
+                "- outputs:",
             ]
         )
-
-        if evidence:
-            for item in evidence:
-                lines.append(f"- {item.get('evidence_type')}: {item.get('evidence_value')}")
+        if output_paths:
+            for p in output_paths:
+                lines.append(f"  - {p}")
         else:
-            lines.append("- evidence: N/A")
+            lines.append("  - N/A")
+        lines.append(f"- doc: {_fmt(run.get('doc_path') or (doc_paths[0] if doc_paths else None))}")
 
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)

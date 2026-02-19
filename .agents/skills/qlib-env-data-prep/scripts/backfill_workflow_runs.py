@@ -1,4 +1,4 @@
-"""Backfill historical HEA markdown docs into workflow tables.
+"""Backfill historical workflow markdown docs into workflow tables.
 
 Usage:
     uv run python .agents/skills/qlib-env-data-prep/scripts/backfill_workflow_runs.py
@@ -132,8 +132,11 @@ def backfill_file(db: WorkflowDB, path: Path) -> None:
     # Single-factor metrics (SFA)
     if any(
         _extract_scalar(text, k) is not None
-        for k in ["rank_ic_mean", "rank_ic_t", "fdr_p", "rank_icir", "n_days", "layer_a_result"]
+        for k in ["rank_ic_mean", "rank_ic_t", "fdr_p", "rank_icir", "n_days", "sfa_result", "layer_a_result"]
     ):
+        sfa_result = _clean_value(_extract_scalar(text, "sfa_result"))
+        if sfa_result is None:
+            sfa_result = _clean_value(_extract_scalar(text, "layer_a_result"))
         db.upsert_sfa_metrics(
             round_id=round_id,
             rank_ic_mean=_to_float(_extract_scalar(text, "rank_ic_mean")),
@@ -141,7 +144,7 @@ def backfill_file(db: WorkflowDB, path: Path) -> None:
             fdr_p=_to_float(_extract_scalar(text, "fdr_p")),
             rank_icir=_to_float(_extract_scalar(text, "rank_icir")),
             n_days=_to_int(_extract_scalar(text, "n_days")),
-            sfa_result=_clean_value(_extract_scalar(text, "layer_a_result")),
+            sfa_result=sfa_result,
         )
 
     # Decision
@@ -181,15 +184,15 @@ def backfill_file(db: WorkflowDB, path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill workflow runs from docs/heas")
     parser.add_argument("--db", default=str(PROJECT_ROOT / "data" / "factor_library.db"), help="SQLite db path")
-    parser.add_argument("--docs-dir", default=str(PROJECT_ROOT / "docs" / "heas"), help="Directory for HEA markdown files")
+    parser.add_argument("--docs-dir", default=str(PROJECT_ROOT / "docs" / "heas"), help="Directory for historical markdown files")
     args = parser.parse_args()
 
     db = WorkflowDB(db_path=args.db)
     docs_dir = Path(args.docs_dir)
-    files = sorted(docs_dir.glob("HEA-*.md"))
+    files = sorted({*docs_dir.glob("HEA-*.md"), *docs_dir.glob("SFA-*.md")})
 
     if not files:
-        print(f"No HEA files found in: {docs_dir}")
+        print(f"No historical workflow files found in: {docs_dir}")
         db.close()
         return 0
 

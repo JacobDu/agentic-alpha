@@ -57,6 +57,8 @@ def main() -> int:
         "workflow_mfa_metrics",
         "workflow_decisions",
         "workflow_evidence",
+        "factor_similarity",
+        "factor_replacements",
         "v_workflow_sfa_rounds",
         "v_workflow_mfa_rounds",
         "v_workflow_round_summary",

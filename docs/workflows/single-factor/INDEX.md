@@ -14,3 +14,5 @@
 1. 每新增一轮 SFA 记录，需同步更新本索引。
 2. evidence 至少包含 doc/output_path/db_query/run_id 之一。
 3. decision 仅允许 Promote / Iterate / Drop。
+4. 记录结构遵循 R-G-E-D：Retrieve/Generate/Evaluate/Distill。
+5. 正交预算固定为 max|rho| <= 0.50。

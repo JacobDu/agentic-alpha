@@ -1,20 +1,17 @@
-"""HEA Round 03: Test composite factors from orthogonal pairs.
+"""Test composite factors from orthogonal pairs.
 
 Composite methods:
 1. ADD: A + B (normalized via z-score style)
 2. MUL: Mul(A, B) — interaction effect
 3. COND_MUL: Mul(A, f(B)) — one factor modulates another
 
-All pairs selected from orthogonal analysis (|ρ| < 0.35, both |ICIR| > 0.15).
+All pairs selected from orthogonal analysis (|rho| < 0.35, both |ICIR| > 0.15).
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
-
-if "--help" in sys.argv or "-h" in sys.argv:
-    print("Usage: uv run python .agents/skills/qlib-single-factor-mining/scripts/test_composite_factors.py")
-    raise SystemExit(0)
 
 def _find_project_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
@@ -183,7 +180,7 @@ COMPOSITE_FACTORS.append((
 
 # ═══════════════════════════════════════════════════════════════
 # GROUP 8: OVN_INTRA_DIV × REVERT_LOWVOL — overnight divergence × conditional reversal
-# Two highly orthogonal factors from HEA-02
+# Two highly orthogonal factors from prior orthogonal batch
 # Both max|ρ| < 0.35 vs all existing top factors
 # ═══════════════════════════════════════════════════════════════
 
@@ -351,16 +348,24 @@ def test_factor_ic(factor_values, label_values, n_days_min=200):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Test composite factors from orthogonal candidates")
+    parser.add_argument("--market", default="csi1000")
+    parser.add_argument("--start", default="2020-01-01")
+    parser.add_argument("--end", default="2024-12-31")
+    parser.add_argument("--source-tag", default="SFA-COMPOSITE")
+    parser.add_argument("--round-id", default="SFA-COMPOSITE-ROUND")
+    args = parser.parse_args()
+
     from project_qlib.runtime import init_qlib
     init_qlib()
     from qlib.data import D
     
-    instruments = D.instruments("csi1000")
+    instruments = D.instruments(args.market)
     
     # Load label
     print("\nLoading label: Ref($close, -2)/Ref($close, -1) - 1")
     label_expr = "Ref($close, -2)/Ref($close, -1) - 1"
-    label_df = D.features(instruments, [label_expr], start_time="2020-01-01", end_time="2024-12-31")
+    label_df = D.features(instruments, [label_expr], start_time=args.start, end_time=args.end)
     label_df.columns = ["label"]
     label = label_df["label"]
     
@@ -373,7 +378,7 @@ def main():
     for i, (expr, name, cat, desc) in enumerate(COMPOSITE_FACTORS):
         print(f"\n[{i+1}/{len(COMPOSITE_FACTORS)}] Testing {name}...")
         try:
-            factor_df = D.features(instruments, [expr], start_time="2020-01-01", end_time="2024-12-31")
+            factor_df = D.features(instruments, [expr], start_time=args.start, end_time=args.end)
             factor_df.columns = ["factor"]
             factor = factor_df["factor"]
             
@@ -479,7 +484,7 @@ def main():
         db.execute("""
             INSERT INTO factors (name, expression, source, category, status, notes)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (row["name"], row.get("expression", ""), "HEA-03", row["category"],
+        """, (row["name"], row.get("expression", ""), args.source_tag, row["category"],
               row["status"], row.get("description", "")))
         
         if row["status"] in ("Accepted", "Candidate", "Rejected"):
@@ -490,13 +495,13 @@ def main():
                 (factor_name, market, test_start, test_end, n_days,
                  rank_ic_mean, rank_ic_std, rank_icir, rank_ic_t, rank_ic_p,
                  significant, hea_round)
-                VALUES (?, 'csi1000', '2020-01-01', '2024-12-31', ?,
+                VALUES (?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
-                        ?, 'HEA-2026-02-18-03')
-            """, (row["name"], row.get("n_days", 0),
+                        ?, ?)
+            """, (row["name"], args.market, args.start, args.end, row.get("n_days", 0),
                   row.get("rank_ic_mean", 0), rank_ic_std,
                   row.get("rank_icir", 0), row.get("t_stat", 0), row.get("p_value", 1),
-                  sig))
+                  sig, args.round_id))
         
         n_inserted += 1
     

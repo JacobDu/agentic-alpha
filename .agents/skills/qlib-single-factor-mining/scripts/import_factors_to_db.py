@@ -5,6 +5,7 @@ Run once to bootstrap the factor library:
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -108,7 +109,7 @@ CUSTOM_FACTORS = [
     ("CSTM_MOM_5", "Ref($close, 1)/Ref($close, 5)-1", "momentum", "5日动量"),
 ]
 
-# Previous test results from outputs/csiall_factor_significance.csv (HEA-2026-02-14-05)
+# Previous test results from outputs/csiall_factor_significance.csv (historical backfill)
 # Only the custom factors that were tested. We'll import these historical results.
 HISTORICAL_CSIALL_RESULTS: dict[str, dict] = {
     "CSTM_VOL_CV_10": {"rank_ic_mean": -0.032, "rank_ic_t": -21.04, "rank_icir": -0.51, "status": "Accepted"},
@@ -139,7 +140,7 @@ def import_alpha158(db: FactorDB) -> int:
     return count
 
 
-def import_custom_factors(db: FactorDB) -> int:
+def import_custom_factors(db: FactorDB, round_id: str) -> int:
     """Import all custom candidate factors."""
     count = 0
     for name, expr, cat, logic in CUSTOM_FACTORS:
@@ -164,14 +165,14 @@ def import_custom_factors(db: FactorDB) -> int:
                 rank_ic_t=hist["rank_ic_t"],
                 rank_icir=hist["rank_icir"],
                 significant=True,
-                hea_round="HEA-2026-02-14-05",
+                hea_round=round_id,
                 evidence="outputs/csiall_factor_significance.csv",
             )
         count += 1
     return count
 
 
-def try_import_csv_results(db: FactorDB) -> int:
+def try_import_csv_results(db: FactorDB, round_id: str) -> int:
     """Try to import detailed results from csiall_factor_significance.csv if it exists."""
     import pandas as pd
 
@@ -208,13 +209,21 @@ def try_import_csv_results(db: FactorDB) -> int:
             fdr_p=float(fdr_p) if not pd.isna(fdr_p) else None,
             significant=is_sig,
             evidence="outputs/csiall_factor_significance.csv",
-            hea_round="HEA-2026-02-14-05",
+            hea_round=round_id,
         )
         count += 1
     return count
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Import baseline/custom factors into SQLite factor library")
+    parser.add_argument(
+        "--round-id",
+        default="SFA-BOOTSTRAP-IMPORT",
+        help="Round identifier stored in test results (hea_round field for compatibility).",
+    )
+    args = parser.parse_args()
+
     db = FactorDB()
     print("=== Importing factors into SQLite factor library ===")
     print(f"Database: {db.db_path}")
@@ -225,15 +234,15 @@ def main():
     print(f"[1/3] Imported {n158} Alpha158 baseline factors")
 
     # 2. Import custom factors
-    n_custom = import_custom_factors(db)
+    n_custom = import_custom_factors(db, round_id=args.round_id)
     print(f"[2/3] Imported {n_custom} custom candidate factors")
 
     # 3. Try importing detailed CSV results
-    n_csv = try_import_csv_results(db)
+    n_csv = try_import_csv_results(db, round_id=args.round_id)
     if n_csv:
         print(f"[3/3] Updated {n_csv} factors with detailed test results from CSV")
     else:
-        print(f"[3/3] No CSV results to import (will be populated during future HEA rounds)")
+        print("[3/3] No CSV results to import (will be populated during future SFA rounds)")
 
     print()
     print(db.summary())

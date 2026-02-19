@@ -132,9 +132,9 @@ CREATE TABLE IF NOT EXISTS factor_ic_decay (
 
 
 class FactorDB:
-    """SQLite-backed factor library (v3 — split definition / results + workflow tables)."""
+    """SQLite-backed factor library (v4 — split definition / results + workflow + similarity)."""
 
-    DB_VERSION = 3
+    DB_VERSION = 4
 
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
@@ -615,6 +615,126 @@ class FactorDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_factor_snapshot(
+        self,
+        name: str,
+        market: str = "csi1000",
+        similarity_limit: int = 10,
+    ) -> dict[str, Any] | None:
+        """Get an aggregated snapshot used by the Retrieve stage."""
+        factor = self.get_factor(name)
+        if factor is None:
+            return None
+
+        latest_test = self._conn.execute(
+            """SELECT * FROM factor_test_results
+               WHERE factor_name = ? AND market = ?
+               ORDER BY tested_at DESC
+               LIMIT 1
+            """,
+            (name, market),
+        ).fetchone()
+        latest_backtest = self._conn.execute(
+            """SELECT * FROM factor_backtest_results
+               WHERE factor_name = ? AND market = ?
+               ORDER BY tested_at DESC
+               LIMIT 1
+            """,
+            (name, market),
+        ).fetchone()
+        latest_decay = self._conn.execute(
+            """SELECT * FROM factor_ic_decay
+               WHERE factor_name = ? AND market = ?
+               ORDER BY tested_at DESC
+               LIMIT 1
+            """,
+            (name, market),
+        ).fetchone()
+        similar_rows = self._conn.execute(
+            """SELECT * FROM factor_similarity
+               WHERE market = ? AND (factor_a = ? OR factor_b = ?)
+               ORDER BY rho_mean_abs DESC, calculated_at DESC
+               LIMIT ?
+            """,
+            (market, name, name, similarity_limit),
+        ).fetchall()
+        replacement_rows = self._conn.execute(
+            """SELECT * FROM factor_replacements
+               WHERE market = ? AND (old_factor = ? OR new_factor = ?)
+               ORDER BY created_at DESC, id DESC
+            """,
+            (market, name, name),
+        ).fetchall()
+
+        return {
+            "factor": factor,
+            "market": market,
+            "latest_test": dict(latest_test) if latest_test else None,
+            "latest_backtest": dict(latest_backtest) if latest_backtest else None,
+            "latest_decay": dict(latest_decay) if latest_decay else None,
+            "similarity": [dict(r) for r in similar_rows],
+            "replacements": [dict(r) for r in replacement_rows],
+        }
+
+    def list_candidate_pool(
+        self,
+        market: str,
+        min_significance: float = 0.01,
+        max_corr: float = 0.50,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        """List candidate factors after significance and similarity constraints."""
+        query = """
+            WITH latest_test AS (
+                SELECT r.*
+                FROM factor_test_results r
+                JOIN (
+                    SELECT factor_name, market, MAX(tested_at) AS max_tested_at
+                    FROM factor_test_results
+                    WHERE market = ?
+                    GROUP BY factor_name, market
+                ) x
+                ON r.factor_name = x.factor_name
+               AND r.market = x.market
+               AND r.tested_at = x.max_tested_at
+            )
+            SELECT
+                f.name,
+                f.category,
+                f.source,
+                f.status,
+                lt.market,
+                lt.test_start,
+                lt.test_end,
+                lt.rank_ic_mean,
+                lt.rank_ic_t,
+                lt.rank_icir,
+                lt.fdr_p,
+                COALESCE((
+                    SELECT MAX(s.rho_mean_abs)
+                    FROM factor_similarity s
+                    WHERE s.market = ?
+                      AND (s.factor_a = f.name OR s.factor_b = f.name)
+                ), 0.0) AS max_rho_abs
+            FROM factors f
+            JOIN latest_test lt ON lt.factor_name = f.name
+            WHERE lt.market = ?
+              AND lt.fdr_p IS NOT NULL
+              AND lt.fdr_p < ?
+              AND COALESCE((
+                    SELECT MAX(s.rho_mean_abs)
+                    FROM factor_similarity s
+                    WHERE s.market = ?
+                      AND (s.factor_a = f.name OR s.factor_b = f.name)
+                ), 0.0) <= ?
+            ORDER BY ABS(lt.rank_icir) DESC, f.name ASC
+        """
+        params: list[Any] = [market, market, market, min_significance, market, max_corr]
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        return pd.read_sql_query(query, self._conn, params=params)
+
     # ------------------------------------------------------------------ #
     #  Query — test results
     # ------------------------------------------------------------------ #
@@ -690,11 +810,17 @@ class FactorDB:
             query += " AND r.significant = 1"
 
         abs_cols = ("rank_icir", "rank_ic_t", "rank_ic_mean", "ic_mean")
-        if order_by in abs_cols:
-            col = f"r.{order_by}" if market else order_by
-            query += f" ORDER BY ABS({col}) DESC"
+        if market:
+            if order_by in abs_cols:
+                query += f" ORDER BY ABS(r.{order_by}) DESC"
+            else:
+                query += f" ORDER BY r.{order_by}" if order_by in {"tested_at", "test_start", "test_end"} else f" ORDER BY f.{order_by}"
         else:
-            query += f" ORDER BY {order_by}"
+            factor_sortable = {"name", "category", "source", "status", "updated_at", "created_at"}
+            if order_by in factor_sortable:
+                query += f" ORDER BY f.{order_by}"
+            else:
+                query += " ORDER BY f.updated_at DESC, f.name ASC"
 
         if limit:
             query += " LIMIT ?"

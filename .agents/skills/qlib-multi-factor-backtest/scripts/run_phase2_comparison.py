@@ -2,7 +2,7 @@
 
 Runs two configs side-by-side:
 1. Baseline: Alpha158 only (158 factors)
-2. HEA: Alpha158 + HEA top factors (~188 factors)
+2. Candidate Pool: Alpha158 + selected SFA top factors (~188 factors)
 
 Compares IC, model performance, and portfolio returns with transaction costs.
 """
@@ -116,7 +116,7 @@ def parse_results(log_path: str) -> dict:
 def main():
     configs = {
         "baseline_alpha158": PROJECT_ROOT / "configs" / "workflow_csi1000_baseline_alpha158.yaml",
-        "hea_top_factors": PROJECT_ROOT / "configs" / "workflow_csi1000_hea_lightgbm.yaml",
+        "sfa_top_factors": PROJECT_ROOT / "configs" / "workflow_csi1000_hea_lightgbm.yaml",
     }
 
     results = {}
@@ -130,12 +130,12 @@ def main():
     print("PHASE 2/3 RESULTS COMPARISON")
     print("=" * 100)
 
-    header = f"{'Metric':<40} {'Baseline (Alpha158)':<25} {'HEA Top Factors':<25} {'Delta':<15}"
+    header = f"{'Metric':<40} {'Baseline (Alpha158)':<25} {'SFA Top Factors':<25} {'Delta':<15}"
     print(header)
     print("-" * 105)
 
     baseline_metrics = results.get("baseline_alpha158", {}).get("metrics", {})
-    hea_metrics = results.get("hea_top_factors", {}).get("metrics", {})
+    hea_metrics = results.get("sfa_top_factors", {}).get("metrics", {})
 
     all_keys = sorted(set(list(baseline_metrics.keys()) + list(hea_metrics.keys())))
     for key in all_keys:

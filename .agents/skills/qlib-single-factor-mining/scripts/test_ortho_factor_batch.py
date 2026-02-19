@@ -1,4 +1,4 @@
-"""HEA Round 02: Orthogonal factor batch.
+"""Orthogonal factor batch test.
 
 Design principles:
 1. Each factor targets a dimension INDEPENDENT of existing top-40 clusters
@@ -15,6 +15,7 @@ Orthogonality targets (existing clusters to avoid high corr with):
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -236,8 +237,34 @@ def compute_ic(factor_df, label_df, method="spearman", industry_map=None):
     return pd.Series(ics)
 
 
-def test_ortho_factors(market="csi1000", start="2020-01-01", end="2024-12-31",
-                       backfill=False, neutralize=True):
+def _apply_fdr(df: pd.DataFrame, p_col: str = "p_value", out_col: str = "fdr_p") -> pd.DataFrame:
+    """Benjamini-Hochberg FDR correction."""
+    result = df.copy()
+    result[out_col] = np.nan
+    valid = result[p_col].notna()
+    if valid.sum() == 0:
+        result["significant"] = False
+        return result
+
+    p_vals = result.loc[valid, p_col].astype(float).values
+    n_tests = len(p_vals)
+    sorted_idx = np.argsort(p_vals)
+    sorted_p = p_vals[sorted_idx]
+    adj = np.zeros(n_tests)
+    for i in range(n_tests - 1, -1, -1):
+        rank = i + 1
+        if i == n_tests - 1:
+            adj[sorted_idx[i]] = sorted_p[i]
+        else:
+            adj[sorted_idx[i]] = min(sorted_p[i] * n_tests / rank, adj[sorted_idx[i + 1]])
+    result.loc[valid, out_col] = np.clip(adj, 0.0, 1.0)
+    result["significant"] = result[out_col] < 0.01
+    return result
+
+
+def test_ortho_factors(market="csi1000", start="2020-01-01", end="2025-12-31",
+                       backfill=False, neutralize=True, round_id="SFA-BATCH-ORTHO",
+                       source_tag="Custom"):
     import warnings
     warnings.filterwarnings("ignore")
 
@@ -287,7 +314,6 @@ def test_ortho_factors(market="csi1000", start="2020-01-01", end="2024-12-31",
             p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df=n_days - 1))
 
             sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else ""
-            status = "Accepted" if p_value < 0.01 else ("Candidate" if p_value < 0.05 else "Rejected")
 
             print(f"  [{i+1:2d}/{len(ORTHO_FACTORS)}] {name:<30} "
                   f"RankIC={mean_ic:+.4f} ICIR={icir:+.3f} "
@@ -296,7 +322,7 @@ def test_ortho_factors(market="csi1000", start="2020-01-01", end="2024-12-31",
             results.append({"factor": name, "category": category, "expression": expr,
                 "rank_ic": mean_ic, "rank_icir": icir, "ic": np.nan, "icir": np.nan,
                 "t_stat": t_stat, "p_value": p_value, "n_days": n_days, "nan_rate": nan_rate,
-                "status": status})
+                "status": "Pending"})
 
         except Exception as e:
             print(f"  [{i+1:2d}/{len(ORTHO_FACTORS)}] {name:<30} ERROR: {e}")
@@ -307,29 +333,37 @@ def test_ortho_factors(market="csi1000", start="2020-01-01", end="2024-12-31",
 
     df = pd.DataFrame(results)
     if not df.empty:
+        df = _apply_fdr(df)
+        df["status"] = np.where(
+            df["significant"] == True,
+            "Accepted",
+            np.where(df["p_value"] < 0.05, "Candidate", "Rejected"),
+        )
         df = df.sort_values("rank_icir", key=abs, ascending=False)
 
     print(f"\n{'='*90}")
     print(f"ORTHOGONAL FACTOR BATCH RESULTS ({market}, {start}~{end})")
     print(f"{'='*90}")
     n_total = len(df)
-    n_sig = (df["p_value"] < 0.01).sum()
-    n_cand = ((df["p_value"] >= 0.01) & (df["p_value"] < 0.05)).sum()
+    n_sig = int(df["significant"].sum()) if "significant" in df.columns else 0
+    n_cand = int(((df["p_value"] < 0.05) & (~df["significant"])).sum()) if "significant" in df.columns else 0
     n_rej = (df["p_value"] >= 0.05).sum()
-    print(f"Total: {n_total} | Accepted (p<0.01): {n_sig} | Candidate (p<0.05): {n_cand} | Rejected: {n_rej}")
+    print(f"Total: {n_total} | Accepted (FDR<0.01): {n_sig} | Candidate (p<0.05): {n_cand} | Rejected: {n_rej}")
 
     print(f"\n--- Top 20 by |RankICIR| ---")
     for rank, (_, row) in enumerate(df.head(20).iterrows(), 1):
         if pd.isna(row["rank_ic"]):
             continue
-        sig = "***" if row["p_value"] < 0.001 else "**" if row["p_value"] < 0.01 else "*"
+        fdr_p = row.get("fdr_p", np.nan)
+        sig = "***" if pd.notna(fdr_p) and fdr_p < 0.01 else ("*" if row["p_value"] < 0.05 else "")
         print(f"  {rank:2d}. {row['factor']:<30} ICIR={row['rank_icir']:+.3f} "
-              f"RankIC={row['rank_ic']:+.4f} t={row['t_stat']:+.1f} [{row['category']:<16}] {sig}")
+              f"RankIC={row['rank_ic']:+.4f} t={row['t_stat']:+.1f} fdr={fdr_p if pd.notna(fdr_p) else np.nan:.4f} "
+              f"[{row['category']:<16}] {sig}")
 
     print(f"\n--- By Category ---")
     cat_stats = df.groupby("category").agg(
         count=("factor", "count"),
-        n_sig=("p_value", lambda x: (x < 0.01).sum()),
+        n_sig=("significant", "sum"),
         best_icir=("rank_icir", lambda x: x.iloc[x.abs().argmax()] if len(x) > 0 else np.nan),
     )
     for cat, row in cat_stats.iterrows():
@@ -343,12 +377,12 @@ def test_ortho_factors(market="csi1000", start="2020-01-01", end="2024-12-31",
     print(f"\nResults saved to {csv_path}")
 
     if backfill and not df.empty:
-        _backfill_to_db(df, market, start, end)
+        _backfill_to_db(df, market, start, end, round_id=round_id, source_tag=source_tag)
 
     return df
 
 
-def _backfill_to_db(df, market, start, end):
+def _backfill_to_db(df, market, start, end, round_id: str, source_tag: str):
     from project_qlib.factor_db import FactorDB
     db = FactorDB()
     n_upsert = 0
@@ -356,29 +390,33 @@ def _backfill_to_db(df, market, start, end):
         if pd.isna(row["rank_ic"]):
             continue
         db.upsert_factor(name=row["factor"], expression=row["expression"],
-            category=row["category"], status=row["status"],
+            category=row["category"], source=source_tag, status=row["status"],
             notes=f"Orthogonal batch factor ({row['category']})")
         db.upsert_test_result(factor_name=row["factor"], market=market,
             test_start=start, test_end=end,
             rank_ic_mean=row["rank_ic"], rank_icir=row["rank_icir"],
             ic_mean=row.get("ic", np.nan), rank_ic_t=row["t_stat"],
-            rank_ic_p=row["p_value"], n_days=int(row["n_days"]),
-            significant=row["p_value"] < 0.01)
+            rank_ic_p=row["p_value"], fdr_p=row.get("fdr_p"), n_days=int(row["n_days"]),
+            significant=bool(row.get("significant", False)), hea_round=round_id)
         n_upsert += 1
     print(f"\nBackfilled {n_upsert} factors to factor library.")
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Test orthogonal candidate factors")
     parser.add_argument("--market", default="csi1000")
     parser.add_argument("--start", default="2020-01-01")
-    parser.add_argument("--end", default="2024-12-31")
+    parser.add_argument("--end", default="2025-12-31")
     parser.add_argument("--backfill", action="store_true")
     parser.add_argument("--no-neutralize", action="store_true")
+    parser.add_argument("--round-id", default="SFA-BATCH-ORTHO",
+                        help="Round id written to DB (hea_round compatibility field)")
+    parser.add_argument("--source-tag", default="Custom",
+                        help="Factor source tag when backfilling")
     args = parser.parse_args()
     test_ortho_factors(market=args.market, start=args.start, end=args.end,
-                       backfill=args.backfill, neutralize=not args.no_neutralize)
+                       backfill=args.backfill, neutralize=not args.no_neutralize,
+                       round_id=args.round_id, source_tag=args.source_tag)
 
 
 if __name__ == "__main__":
