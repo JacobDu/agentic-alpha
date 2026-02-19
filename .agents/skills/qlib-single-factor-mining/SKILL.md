@@ -5,29 +5,53 @@ description: 负责在 csi1000 上进行单因子设计、IC/RankIC 显著性检
 
 # Qlib 单因子挖掘
 
-执行单因子实验与统计评估。
+负责 SFA 工作流：候选因子设计、统计检验、证据留痕。
 
-## 使用脚本
+## 输入与输出
 
-- 使用 `scripts/test_factor_ic.py` 做统一因子排名。
-- 使用 `scripts/test_new_factors.py` 验证新候选因子。
-- 使用 `scripts/test_new_factor_batch.py` 做批量候选测试。
-- 使用 `scripts/test_ortho_factor_batch.py` 做正交因子测试。
-- 使用 `scripts/test_composite_factors.py` 做复合因子测试。
-- 使用 `scripts/test_financial_factors.py` 做财务因子验证。
-- 使用 `scripts/analyze_factor_correlation.py` 做冗余相关性分析。
-- 使用 `scripts/factor_db_cli.py` 查询因子库与证据记录。
-- 使用 `scripts/import_factors_to_db.py` 执行因子定义入库初始化。
-- 使用 `scripts/sfa_record_cli.py` 记录/查询 SFA 工作流轮次并同步文档索引。
+- 输入：因子假设、表达式、市场与时间区间。
+- 输出：单因子统计指标（IC/RankIC/FDR/ICIR）、决策与证据链接。
 
-## 执行流程
+## 可复用脚本
 
-1. 先写假设与表达式。
-2. 做解析与冗余预检。
-3. 执行 IC 与 FDR 检验。
-4. 使用 `sfa_record_cli.py` 写入 SFA 决策证据并同步 `docs/workflows/single-factor/INDEX.md`。
+### 单因子测试
+- `scripts/test_factor_ic.py`
+- `scripts/test_new_factors.py`
+- `scripts/test_new_factor_batch.py`
+- `scripts/test_ortho_factor_batch.py`
+- `scripts/test_composite_factors.py`
+- `scripts/test_financial_factors.py`
+
+### 诊断与分析
+- `scripts/analyze_factor_correlation.py`
+
+### 数据库与记录
+- `scripts/import_factors_to_db.py`
+- `scripts/factor_db_cli.py`
+- `scripts/sfa_record_cli.py`
+
+## 标准执行顺序
+
+1. 明确假设与表达式。
+2. 执行解析/冗余预检。
+3. 运行单因子统计检验。
+4. 用 `sfa_record_cli.py` 写入 SFA 记录并同步索引。
+
+## 记录模板
+
+- `assets/templates/single_factor_experiment_record.md`
+
+## 证据要求
+
+- 至少包含一个可追溯证据：`output_path` / `db_query` / `run_id` / `doc`。
+- `decision` 仅允许 `Promote / Iterate / Drop`。
+
+## 临时脚本边界
+
+1. 本 skill 的 `scripts/` 只保留可复用脚本。
+2. 一次性研究脚本必须放在项目根目录 `./scripts/`。
+3. 临时脚本完成后必须清理，不得长期保留在 skill 内。
 
 ## 参考资料
 
-- 阅读 `references/layer_a_thresholds.md` 了解 Promote 门槛。
-- 单因子记录模板：`assets/templates/single_factor_experiment_record.md`。
+- `references/layer_a_thresholds.md`

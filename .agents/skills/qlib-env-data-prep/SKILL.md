@@ -5,27 +5,49 @@ description: 负责本仓库的 Qlib 运行环境与数据准备、可用性校�
 
 # Qlib 环境与数据准备
 
-在因子实验前完成环境与数据门禁检查。
+保障实验前环境可用、数据完整、流程可运行。
 
-## 使用脚本
+## 输入与输出
 
-- 使用 `scripts/prepare_data.py` 准备基础 Qlib 数据。
-- 使用 `scripts/download_financial_data.py` 注入估值与财务字段。
-- 使用 `scripts/check_data.py` 检查数据可用性。
-- 使用 `scripts/verify_all.py` 执行端到端就绪验证。
-- 使用 `scripts/run_official.py` 与 `scripts/run_custom_factor.py` 做基线冒烟测试。
-- 使用 `scripts/mlflow_ui.sh` 查看 MLflow 结果。
-- 使用 `scripts/migrate_workflow_schema.py` 创建/升级 workflow 记录表结构。
-- 使用 `scripts/backfill_workflow_runs.py` 将历史 `docs/heas/*.md` 回填到 workflow 记录表。
+- 输入：目标市场、数据目录、是否需要回填 workflow 结构。
+- 输出：环境就绪结论、数据覆盖结果、可执行脚本日志与必要修复建议。
 
-## 执行流程
+## 可复用脚本
 
-1. 先准备数据。
-2. 再检查数据状态。
-3. 运行整体验证。
-4. 若失败，先修复再进入因子挖掘。
+### 数据准备与校验
+- `scripts/prepare_data.py`
+- `scripts/download_financial_data.py`
+- `scripts/check_data.py`
+- `scripts/verify_all.py`
+
+### 基线冒烟
+- `scripts/run_official.py`
+- `scripts/run_custom_factor.py`
+- `scripts/mlflow_ui.sh`
+
+### Workflow DB 运维
+- `scripts/migrate_workflow_schema.py`
+- `scripts/backfill_workflow_runs.py`
+
+## 标准执行顺序
+
+1. 先执行数据准备与字段注入。
+2. 再执行可用性检查与端到端验证。
+3. 若失败，优先修复环境再交给下游 skill。
+4. 需要 workflow 数据治理时，执行 schema 迁移与文档回填。
+
+## 证据要求
+
+- 输出目录：`outputs/`（检查结果、脚本日志）
+- 关键结论应可回溯到具体脚本输出或 DB 记录。
+
+## 临时脚本边界
+
+1. 本 skill 的 `scripts/` 仅维护可复用脚本。
+2. 单次排障/一次性检查脚本必须放在项目根目录 `./scripts/`。
+3. 临时脚本执行完成后必须清理，不得留在 skill 目录。
 
 ## 参考资料
 
-- 阅读 `references/data_prep_playbook.md` 了解执行顺序。
-- 阅读 `references/feature_catalog.md` 了解字段覆盖。
+- `references/data_prep_playbook.md`
+- `references/feature_catalog.md`
