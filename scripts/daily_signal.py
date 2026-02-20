@@ -55,6 +55,29 @@ PORTFOLIO_FILE = DRYRUN_DIR / "portfolio.json"
 TRADE_LOG_FILE = DRYRUN_DIR / "trade_log.csv"
 STATE_FILE = DRYRUN_DIR / "state.json"
 
+
+def set_profile(profile_name: str | None):
+    """切换 profile，每个 profile 有独立的输出目录。
+
+    profile=None 时使用默认目录 outputs/dryrun/；
+    否则使用 outputs/dryrun-{profile_name}/。
+    模型可以共享（如果参数相同），信号和持仓各自独立。
+    """
+    global DRYRUN_DIR, MODEL_DIR, SIGNAL_DIR, PORTFOLIO_FILE, TRADE_LOG_FILE, STATE_FILE
+    if profile_name:
+        DRYRUN_DIR = ROOT / "outputs" / f"dryrun-{profile_name}"
+    else:
+        DRYRUN_DIR = ROOT / "outputs" / "dryrun"
+    MODEL_DIR = DRYRUN_DIR / "models"
+    SIGNAL_DIR = DRYRUN_DIR / "signals"
+    PORTFOLIO_FILE = DRYRUN_DIR / "portfolio.json"
+    TRADE_LOG_FILE = DRYRUN_DIR / "trade_log.csv"
+    STATE_FILE = DRYRUN_DIR / "state.json"
+    for d in [DRYRUN_DIR, MODEL_DIR, SIGNAL_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+# 默认初始化目录
 for d in [DRYRUN_DIR, MODEL_DIR, SIGNAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -69,7 +92,8 @@ MAX_PER_CAT = 5
 RETRAIN_FREQ_MONTHS = 3
 TRAIN_START = "2018-01-01"
 
-# 交易成本
+# 资金与交易成本
+INITIAL_CAPITAL = 1_000_000  # 初始资金 100 万元
 OPEN_COST = 0.0005   # 买入 5bp
 CLOSE_COST = 0.0015  # 卖出 15bp
 MIN_COST = 5
@@ -259,7 +283,6 @@ def get_today_scores() -> pd.Series:
 
     返回 Series，index = (date, instrument), value = score
     """
-    from dateutil.relativedelta import relativedelta
 
     xgb_model = load_model("xgb_latest")
     lgb_model = load_model("lgb_latest")
@@ -269,17 +292,18 @@ def get_today_scores() -> pd.Series:
 
     state = load_state()
     today = datetime.now()
-    # 需要足够的历史数据来计算技术指标（Alpha158 需要约 240 个交易日）
-    feat_start = today - relativedelta(years=2)
-    feat_end = today + relativedelta(days=5)
+    # 测试段: 最近一个月的数据用于预测打分
+    # 如果数据尚未更新到今天，会使用最近可用的日期
+    test_start = today - timedelta(days=30)
+    feat_end = today + timedelta(days=5)
 
     train_range = state.get("train_range", f"{TRAIN_START} ~ 2024-12-31")
     train_start, train_end = train_range.split(" ~ ")
 
     ds = create_dataset(
         train=(train_start, train_end),
-        valid=(train_end, today.strftime("%Y-%m-%d")),
-        test=(today.strftime("%Y-%m-%d"), feat_end.strftime("%Y-%m-%d")),
+        valid=(train_end, test_start.strftime("%Y-%m-%d")),
+        test=(test_start.strftime("%Y-%m-%d"), feat_end.strftime("%Y-%m-%d")),
     )
 
     # XGB 预测
@@ -303,6 +327,30 @@ def get_today_scores() -> pd.Series:
     return scores
 
 
+def get_latest_close_prices(instruments: list[str], trade_date: str) -> dict[str, float]:
+    """从 Qlib 获取最新收盘价。"""
+    from qlib.data import D
+    try:
+        end = trade_date
+        start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+        df = D.features(instruments, ["$close"], start_time=start, end_time=end)
+        if df.empty:
+            return {}
+        # 取每只股票最新一天的收盘价
+        prices = {}
+        for inst in instruments:
+            try:
+                sub = df.xs(inst, level="instrument")
+                if not sub.empty:
+                    prices[inst] = float(sub.iloc[-1, 0])
+            except (KeyError, IndexError):
+                continue
+        return prices
+    except Exception as e:
+        print(f"  ⚠ 获取收盘价失败: {e}")
+        return {}
+
+
 def generate_signals(scores: pd.Series, trade_date: str) -> dict:
     """基于 TopkDropout 逻辑生成买卖信号。
 
@@ -311,7 +359,7 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
         trade_date: 交易日期 YYYY-MM-DD
 
     返回:
-        信号字典，包含 buy/sell/hold 列表
+        信号字典，包含 buy/sell/hold 列表（含目标金额和股数）
     """
     portfolio = load_portfolio()
     current_holdings = set(portfolio.get("holdings", {}).keys())
@@ -325,13 +373,21 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
         valid_dates = [d for d in dates if str(d)[:10] <= trade_date]
         if not valid_dates:
             print(f"  ⚠ 无法找到 {trade_date} 或之前的预测数据")
-            return {"date": trade_date, "buy": [], "sell": [], "hold": list(current_holdings)}
+            return {
+                "date": trade_date, "model_date": "N/A",
+                "total_scored": 0,
+                "buy": [], "sell": [], "hold": list(current_holdings),
+                "portfolio_size_before": len(current_holdings),
+                "portfolio_size_after": len(current_holdings),
+                "warning": f"数据未覆盖 {trade_date}，请先更新数据",
+            }
         latest_date = max(valid_dates)
         day_scores = scores.xs(latest_date, level=0)
     else:
         day_scores = scores
 
     day_scores = day_scores.dropna().sort_values(ascending=False)
+    actual_date = str(latest_date)[:10] if isinstance(scores.index, pd.MultiIndex) else trade_date
 
     # ── TopkDropout 逻辑 ────────────────────────────────────────────
     top_instruments = set(day_scores.index[:HOLD_THRESH])  # 排名在 hold_thresh 内的股票
@@ -355,35 +411,61 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
     # 继续持有的
     to_hold = list(after_sell)
 
+    # ── 获取收盘价并计算仓位 ────────────────────────────────────────
+    capital = portfolio.get("cash", INITIAL_CAPITAL)
+    all_instruments = list(set(to_buy) | set(to_sell) | set(to_hold))
+    prices = get_latest_close_prices(all_instruments, trade_date) if all_instruments else {}
+    total_positions = len(after_sell) + len(to_buy)
+    target_weight = 1.0 / total_positions if total_positions > 0 else 0
+    target_amount = capital * target_weight  # 每只股票的目标金额
+
     # 构建信号
     signal = {
         "date": trade_date,
-        "model_date": str(latest_date)[:10] if isinstance(scores.index, pd.MultiIndex) else trade_date,
+        "model_date": actual_date,
         "total_scored": len(day_scores),
         "buy": [],
         "sell": [],
         "hold": [],
         "portfolio_size_before": len(current_holdings),
-        "portfolio_size_after": len(after_sell) + len(to_buy),
+        "portfolio_size_after": total_positions,
+        "capital": capital,
+        "target_weight": round(target_weight, 4),
+        "target_amount_per_stock": round(target_amount, 2),
     }
 
-    # 买入信号（附带分数和排名）
+    # 买入信号（附带分数、排名、目标金额和股数）
     for inst in to_buy:
         rank = list(day_scores.index).index(inst) + 1
+        price = prices.get(inst)
+        shares = 0
+        if price and price > 0:
+            shares = int(target_amount / price / 100) * 100  # 按手取整（100股/手）
         signal["buy"].append({
             "instrument": inst,
             "score": round(float(day_scores[inst]), 6),
             "rank": rank,
+            "price": round(price, 2) if price else None,
+            "target_amount": round(target_amount, 2),
+            "shares": shares,
+            "actual_amount": round(shares * price, 2) if price and shares else 0,
             "estimated_cost": f"{OPEN_COST * 100:.2f}%",
         })
 
     # 卖出信号
     for inst in to_sell:
         rank = list(day_scores.index).index(inst) + 1 if inst in day_scores.index else -1
+        price = prices.get(inst)
+        # 卖出数量 = 组合中该股票的当前持仓量
+        held_info = portfolio.get("holdings", {}).get(inst, {})
+        held_shares = held_info.get("shares", 0)
         signal["sell"].append({
             "instrument": inst,
             "score": round(float(day_scores.get(inst, 0)), 6),
             "rank": rank,
+            "price": round(price, 2) if price else None,
+            "shares": held_shares,
+            "estimated_amount": round(held_shares * price, 2) if price and held_shares else 0,
             "reason": "排名跌出 hold_thresh" if rank > HOLD_THRESH else "清退",
             "estimated_cost": f"{CLOSE_COST * 100:.2f}%",
         })
@@ -391,10 +473,16 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
     # 持有信号
     for inst in sorted(to_hold):
         rank = list(day_scores.index).index(inst) + 1 if inst in day_scores.index else -1
+        price = prices.get(inst)
+        held_info = portfolio.get("holdings", {}).get(inst, {})
+        held_shares = held_info.get("shares", 0)
         signal["hold"].append({
             "instrument": inst,
             "score": round(float(day_scores.get(inst, 0)), 6),
             "rank": rank,
+            "price": round(price, 2) if price else None,
+            "shares": held_shares,
+            "market_value": round(held_shares * price, 2) if price and held_shares else 0,
         })
 
     return signal
@@ -408,7 +496,7 @@ def load_portfolio() -> dict:
     """加载当前持仓。"""
     if PORTFOLIO_FILE.exists():
         return json.load(open(PORTFOLIO_FILE))
-    return {"holdings": {}, "cash": 1e8, "last_update": None}
+    return {"holdings": {}, "cash": INITIAL_CAPITAL, "last_update": None}
 
 
 def save_portfolio(portfolio: dict):
@@ -448,6 +536,9 @@ def update_portfolio(signal: dict):
             "entry_date": signal["date"],
             "entry_score": b["score"],
             "entry_rank": b["rank"],
+            "shares": b.get("shares", 0),
+            "entry_price": b.get("price"),
+            "target_amount": b.get("target_amount", 0),
         }
 
     portfolio["holdings"] = holdings
@@ -473,6 +564,9 @@ def append_trade_log(signal: dict):
             "instrument": b["instrument"],
             "score": b["score"],
             "rank": b["rank"],
+            "price": b.get("price"),
+            "shares": b.get("shares", 0),
+            "amount": b.get("actual_amount", 0),
         })
     for s in signal["sell"]:
         rows.append({
@@ -481,6 +575,9 @@ def append_trade_log(signal: dict):
             "instrument": s["instrument"],
             "score": s["score"],
             "rank": s["rank"],
+            "price": s.get("price"),
+            "shares": s.get("shares", 0),
+            "amount": s.get("estimated_amount", 0),
             "reason": s.get("reason", ""),
         })
 
@@ -504,19 +601,29 @@ def print_signal_summary(signal: dict):
     print(f"📁 组合: {signal['portfolio_size_before']} → {signal['portfolio_size_after']} 只")
     print(f"{'='*60}")
 
+    # 资金信息
+    if "capital" in signal:
+        print(f"💰 总资金: {signal['capital']:,.0f}  每只目标: {signal.get('target_amount_per_stock', 0):,.0f}元")
+
     if signal["buy"]:
         print(f"\n🟢 买入 ({len(signal['buy'])} 只):")
-        print(f"  {'股票':<12} {'分数':>10} {'排名':>6} {'成本':>8}")
-        print(f"  {'-'*40}")
+        print(f"  {'股票':<12} {'现价':>8} {'股数':>8} {'金额':>12} {'排名':>6} {'分数':>10}")
+        print(f"  {'-'*62}")
         for b in signal["buy"]:
-            print(f"  {b['instrument']:<12} {b['score']:>10.6f} {b['rank']:>6d} {b['estimated_cost']:>8}")
+            price_str = f"{b['price']:.2f}" if b.get('price') else '  N/A'
+            shares_str = f"{b['shares']:>6d}" if b.get('shares') else '   N/A'
+            amount_str = f"{b.get('actual_amount', 0):>10,.0f}" if b.get('actual_amount') else '       N/A'
+            print(f"  {b['instrument']:<12} {price_str:>8} {shares_str:>8} {amount_str:>12} {b['rank']:>6d} {b['score']:>10.6f}")
 
     if signal["sell"]:
         print(f"\n🔴 卖出 ({len(signal['sell'])} 只):")
-        print(f"  {'股票':<12} {'分数':>10} {'排名':>6} {'原因':<20}")
-        print(f"  {'-'*52}")
+        print(f"  {'股票':<12} {'现价':>8} {'股数':>8} {'金额':>12} {'排名':>6} {'原因':<16}")
+        print(f"  {'-'*68}")
         for s in signal["sell"]:
-            print(f"  {s['instrument']:<12} {s['score']:>10.6f} {s['rank']:>6d} {s.get('reason',''):<20}")
+            price_str = f"{s['price']:.2f}" if s.get('price') else '  N/A'
+            shares_str = f"{s['shares']:>6d}" if s.get('shares') else '   N/A'
+            amount_str = f"{s.get('estimated_amount', 0):>10,.0f}" if s.get('estimated_amount') else '       N/A'
+            print(f"  {s['instrument']:<12} {price_str:>8} {shares_str:>8} {amount_str:>12} {s['rank']:>6d} {s.get('reason',''):<16}")
 
     if signal["hold"]:
         print(f"\n⚪ 持有 ({len(signal['hold'])} 只):")
@@ -539,7 +646,10 @@ def cmd_init(args):
     print(f"   特征: Alpha158 + DB因子Top{TOPN_FACTORS} (mpc={MAX_PER_CAT})")
 
     # 1. 更新数据
-    update_data_from_baostock()
+    if not args.skip_data:
+        update_data_from_baostock()
+    else:
+        print("  [跳过数据更新]")
 
     # 2. 初始化 Qlib
     init_qlib()
@@ -574,7 +684,10 @@ def cmd_daily(args):
         return
 
     # 1. 更新数据
-    update_data_from_baostock()
+    if not args.skip_data:
+        update_data_from_baostock()
+    else:
+        print("  [跳过数据更新]")
 
     # 2. 初始化 Qlib
     init_qlib()
@@ -600,7 +713,8 @@ def cmd_daily(args):
 def cmd_retrain(args):
     """强制重训模型。"""
     print("🔄 强制重训模型")
-    update_data_from_baostock()
+    if not args.skip_data:
+        update_data_from_baostock()
     init_qlib()
     train_and_save_models(force=True)
 
@@ -632,10 +746,20 @@ def cmd_status(args):
     print(f"  最后更新: {portfolio.get('last_update', '--')}")
 
     if holdings:
-        print(f"\n  持仓列表:")
+        total_cost = 0
+        print(f"\n  {'股票':<12} {'入场日':>12} {'入场价':>8} {'股数':>8} {'成本':>12} {'排名':>6}")
+        print(f"  {'-'*64}")
         for inst, info in sorted(holdings.items()):
             entry = info.get("entry_date", "?")
-            print(f"    {inst:<12} 入场={entry}  rank={info.get('entry_rank', '?')}")
+            price = info.get("entry_price")
+            shares = info.get("shares", 0)
+            cost = round(shares * price, 2) if price and shares else 0
+            total_cost += cost
+            price_str = f"{price:.2f}" if price else "N/A"
+            print(f"  {inst:<12} {entry:>12} {price_str:>8} {shares:>8d} {cost:>12,.0f} {info.get('entry_rank', '?'):>6}")
+        print(f"  {'-'*64}")
+        print(f"  {'合计':<12} {'':>12} {'':>8} {'':>8} {total_cost:>12,.0f}")
+        print(f"  初始资金: {portfolio.get('cash', INITIAL_CAPITAL):,.0f}元")
 
     # 信号历史
     signals = sorted(SIGNAL_DIR.glob("*.json"))
@@ -666,10 +790,25 @@ def main():
     parser.add_argument("--retrain", action="store_true", help="强制重训模型")
     parser.add_argument("--status", action="store_true", help="查看当前状态")
     parser.add_argument("--force", action="store_true", help="强制重新生成今日信号")
+    parser.add_argument("--skip-data", action="store_true", help="跳过 baostock 数据更新")
+    parser.add_argument("--capital", type=float, default=None,
+                        help=f"初始资金（默认 {INITIAL_CAPITAL:,.0f} 元）")
+    parser.add_argument("--profile", type=str, default=None,
+                        help="策略配置名称，支持同时运行多个独立实例（如: test1, conservative）")
 
     args = parser.parse_args()
 
+    # 设置 profile
+    if args.profile:
+        set_profile(args.profile)
+        print(f"📁 Profile: {args.profile} (目录: outputs/dryrun-{args.profile}/)") 
+
     if args.init:
+        if args.capital:
+            # 更新初始资金
+            portfolio = load_portfolio()
+            portfolio["cash"] = args.capital
+            save_portfolio(portfolio)
         cmd_init(args)
     elif args.retrain:
         cmd_retrain(args)
