@@ -8,14 +8,11 @@ Compares IC, model performance, and portfolio returns with transaction costs.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
 from pathlib import Path
-
-if "--help" in sys.argv or "-h" in sys.argv:
-    print("Usage: uv run python .agents/skills/qlib-multi-factor-backtest/scripts/run_phase2_comparison.py")
-    raise SystemExit(0)
 
 def _find_project_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
@@ -115,9 +112,27 @@ def parse_results(log_path: str) -> dict:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run baseline vs candidate comparison on CSI1000")
+    parser.add_argument(
+        "--baseline-config",
+        default=str(PROJECT_ROOT / "configs" / "workflow_csi1000_baseline_alpha158.yaml"),
+        help="Path to baseline config YAML",
+    )
+    parser.add_argument(
+        "--candidate-config",
+        default=str(PROJECT_ROOT / "configs" / "workflow_csi1000_hea_lightgbm.yaml"),
+        help="Path to candidate config YAML",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(PROJECT_ROOT / "outputs" / "phase2_comparison.json"),
+        help="Path to output JSON",
+    )
+    args = parser.parse_args()
+
     configs = {
-        "baseline_alpha158": PROJECT_ROOT / "configs" / "workflow_csi1000_baseline_alpha158.yaml",
-        "sfa_top_factors": PROJECT_ROOT / "configs" / "workflow_csi1000_hea_lightgbm.yaml",
+        "baseline_alpha158": Path(args.baseline_config),
+        "sfa_top_factors": Path(args.candidate_config),
     }
 
     results = {}
@@ -182,7 +197,8 @@ def main():
         }
         for name, r in results.items()
     }
-    out_path = PROJECT_ROOT / "outputs" / "phase2_comparison.json"
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
     print(f"\nResults saved to {out_path}")
 

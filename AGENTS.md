@@ -43,6 +43,19 @@
 - 触发条件：相关性 `> 0.80`
 - 允许替换条件：新因子 `|ICIR|` 相对旧因子提升 `>= 20%`
 
+### MFA 默认时间切分（风格优先）
+- 训练集（Train）：`2000-01-04 ~ 2023-12-31`
+- 验证集（Valid）：`2024-01-01 ~ 2024-12-31`
+- OOS 测试集（Test/OOS）：`2025-01-01 ~ 数据最新可用日`
+- 若数据最新日早于 `2026-12-31`，必须在文档中明确“2026 为年内截断 OOS”。
+
+### 指标术语与字段标准
+- 统一采用 `docs/METRIC_STANDARD_V1.md`。
+- 强制区分：
+  - 日超额收益：`excess_return_daily_with_cost` / `excess_return_daily_no_cost`
+  - 年化超额收益：`excess_return_annualized_with_cost` / `excess_return_annualized_no_cost`
+- 历史别名（如 `IR_with_cost`、`ann_ret_with_cost`）仅用于兼容读取，不作为新增文档主字段。
+
 ## 因子资产与记录
 
 1. 因子总表：`factors`（位于 `data/factor_library.db`）必须长期保留，记录所有因子定义与状态。
@@ -55,6 +68,32 @@
 
 ## 经验记忆（维护在本文件）
 
+### 当前 SOTA 基准（MFA-V4b, 2026-02-20）
+
+| 维度 | 配置 |
+|------|------|
+| 模型 | Ensemble（XGBoost + LightGBM 均值集成） |
+| 训练模式 | Rolling 3m 季度重训（5 个滚动窗口） |
+| 训练起始 | 2018 年 |
+| 特征 | Alpha158 + DB 因子 Top30（max_per_cat=5） |
+| 预测目标 | 1d forward return |
+| 组合策略 | TopkDropoutStrategy（topk=30, n_drop=5, hold_thresh=60） |
+| 交易成本 | open=5bp, close=15bp, min_cost=5 |
+| XGB 参数 | eta=0.05, max_depth=8, colsample_bytree=0.8879, subsample=0.8789, alpha=205.70, lambda=580.98, n_estimators=1000 |
+| LGB 参数 | lr=0.05, max_depth=8, num_leaves=128, lambda_l1=205.70, lambda_l2=580.97, n_estimators=1000 |
+
+**OOS 性能（2025-01-01 ~ 2026-02-13，年内截断 OOS）**：
+
+| 指标 | 值 |
+|------|-----|
+| 年化超额收益（含成本） | **+29.10%** |
+| IR（含成本） | **+1.920** |
+| 最大回撤 | **-7.00%** |
+
+> 证据：`outputs/mfa_v4b_results.json` → 实验 `C_roll3m_ens_tk30_h60`  
+> 文档：`docs/workflows/multi-factor/MFA-V4b-2026-02-20.md`  
+> DB：`data/factor_library.db` → `workflow_runs` / `workflow_mfa_metrics` (round_id=MFA-V4b-2026-02-20)
+
 维护原则：
 1. 仅记录可复用的结构化经验，不记录一次性日志。
 2. 每次 Distill 最多新增 3 条，超过容量时按时间滚动淘汰旧项。
@@ -63,9 +102,15 @@
 ### 推荐方向（最多50条）
 1. 在 `csi1000` 多因子组合中，优先测试 `hold_thresh=40` 的低换手配置；当候选池为“最新显著Top30”时，交易成本下降带来的净值改善显著。
 2. 线性加权（按 `rank_icir` 方向与绝对值权重）应作为 MFA 基准组合长期保留，用于快速筛掉退化的非线性配置。
+3. Rolling 3m + XGB+LGB Ensemble 是当前 MFA 最佳训练范式（OOS +29.10%, IR=1.920），应作为默认配置。
+4. `topk=30 + hold_thresh=60` 是 Rolling 模式下的最优组合参数；高 hold 阈值有效控制换手成本。
+5. 因子数 n=30 (max_per_cat=5)、训练起始 2018 年是 "less is more" 最优点；不宜盲目扩充。
 
 ### 禁止方向（最多50条）
 1. 当候选池切换后，不要默认沿用旧模型结论；`LGB/Ensemble` 可能在 `hold<=20` 出现 IR 为负，必须先做统一口径回测再决策。
+2. 不要使用 2d/5d multi-day label 作为 TopkDropout 日频策略的预测目标 —— 1d label 是唯一有效目标（V4b 验证：label 工程使收益下降 54-82%）。
+3. 不要使用 6m 滚动或更长训练起始(2010-)—— 因子时效性短，旧数据引入噪声（V4b 验证：6m 落后 3m 达 +14%、2010 起始落后 2018 达 -14%）。
+4. 不要盲目增加因子数(n>30)—— 更多因子=更多噪声（V4b 验证：n40 比 n30 收益下降 -3.43%）。
 
 ## 脚本治理
 

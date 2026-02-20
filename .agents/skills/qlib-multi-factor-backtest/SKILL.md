@@ -12,6 +12,24 @@ description: 负责 Top-N 多因子训练与含交易成本组合回测。用于
 - 输入：因子池、模型配置、回测区间与交易参数。
 - 输出：MFA 指标（含成本收益/IR/回撤）、决策、证据与文档。
 
+## 默认时序切分（csi1000）
+
+- Train：`2000-01-04 ~ 2023-12-31`
+- Valid：`2024-01-01 ~ 2024-12-31`
+- Test（OOS）：`2025-01-01 ~ 数据最新可用日`
+- 目标：在长历史训练基础上，用最近一年验证超参数与模型选择，以提升对近期市场风格的适配。
+
+## 指标命名标准
+
+- 统一使用 `docs/METRIC_STANDARD_V1.md` 与 `src/project_qlib/metrics_standard.py`。
+- 优先输出 canonical 字段：
+  - `excess_return_annualized_with_cost`
+  - `information_ratio_with_cost`
+  - `max_drawdown_with_cost`
+  - `excess_return_daily_with_cost`
+  - `ic_mean` / `rank_ic_mean` / `ic_ir` / `rank_ic_ir`
+- 旧字段名（如 `IR_with_cost`、`ann_ret_with_cost`）仅保留兼容读取，不作为新增文档主口径。
+
 ## R-G-E-D 执行定义
 
 ### 1) Retrieve
@@ -23,7 +41,7 @@ description: 负责 Top-N 多因子训练与含交易成本组合回测。用于
 2. 固定同一训练/验证/测试切分，保证可比性。
 
 ### 3) Evaluate
-1. 统一回测口径输出 `excess_return_with_cost`、`ir_with_cost`、`max_drawdown`。
+1. 统一回测口径输出 `excess_return_annualized_with_cost`、`information_ratio_with_cost`、`max_drawdown_with_cost`，并补充 `excess_return_daily_with_cost`。
 2. 执行交易成本压力测试（不同成本/调仓强度参数）。
 3. 判定是否相对基线产生稳定增量，而非单次偶然提升。
 
