@@ -124,7 +124,7 @@ LGB_PARAMS = dict(
 def update_data_from_baostock():
     """调用已有的 baostock 数据下载脚本，增量更新 Qlib 数据。"""
     print("=" * 60)
-    print("[数据更新] 通过 baostock 增量更新行情数据...")
+    print(f"[数据更新] 通过 baostock 增量更新 {MARKET} 行情数据...")
     script = ROOT / ".agents/skills/qlib-env-data-prep/scripts/download_financial_data.py"
     if not script.exists():
         print(f"  ⚠ 数据更新脚本不存在: {script}")
@@ -133,12 +133,12 @@ def update_data_from_baostock():
 
     import subprocess
     result = subprocess.run(
-        [sys.executable, str(script), "--phase", "1"],
+        [sys.executable, str(script), "--phase", "1", "--market", MARKET],
         cwd=str(ROOT),
-        capture_output=True, text=True, timeout=600,
+        timeout=3600,
     )
     if result.returncode != 0:
-        print(f"  ⚠ 数据更新失败: {result.stderr[-500:]}")
+        print("  ⚠ 数据更新失败")
         return False
     print("  ✓ 数据更新完成")
     return True
@@ -151,6 +151,24 @@ def init_qlib():
         qlib.init(provider_uri=str(ROOT / "data/qlib/cn_data"), region="cn")
     except Exception:
         pass
+
+
+def _get_last_complete_calendar_date() -> str:
+    """读取 Qlib 日历文件，返回最后一个数据完整的交易日。
+
+    跳过今天（可能部分股票尚无数据），返回昨天或更早的日期。
+    """
+    cal_file = ROOT / "data/qlib/cn_data/calendars/day.txt"
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if cal_file.exists():
+        dates = [l.strip() for l in cal_file.read_text().strip().split("\n") if l.strip()]
+        # 返回 < today 的最后一个日期，确保数据完整
+        safe_dates = [d for d in dates if d < today_str]
+        if safe_dates:
+            return safe_dates[-1]
+        if dates:
+            return dates[-1]
+    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -247,8 +265,8 @@ def train_and_save_models(force=False):
 
     train = (TRAIN_START, train_end.strftime("%Y-%m-%d"))
     valid = (valid_start.strftime("%Y-%m-%d"), valid_end.strftime("%Y-%m-%d"))
-    # test segment covers recent data for feature computation
-    test = (today.strftime("%Y-%m-%d"), (today + relativedelta(days=30)).strftime("%Y-%m-%d"))
+    # test segment: 仅用于占位，不超过 valid_end
+    test = (valid_end.strftime("%Y-%m-%d"), valid_end.strftime("%Y-%m-%d"))
 
     print(f"\n[模型训练] Ensemble (XGB + LGB)")
     print(f"  训练集: {train[0]} ~ {train[1]}")
@@ -292,10 +310,9 @@ def get_today_scores() -> pd.Series:
 
     state = load_state()
     today = datetime.now()
-    # 测试段: 最近一个月的数据用于预测打分
-    # 如果数据尚未更新到今天，会使用最近可用的日期
+    # 测试段结束日不超过数据完整的最后一天
+    data_end = _get_last_complete_calendar_date()
     test_start = today - timedelta(days=30)
-    feat_end = today + timedelta(days=5)
 
     train_range = state.get("train_range", f"{TRAIN_START} ~ 2024-12-31")
     train_start, train_end = train_range.split(" ~ ")
@@ -303,7 +320,7 @@ def get_today_scores() -> pd.Series:
     ds = create_dataset(
         train=(train_start, train_end),
         valid=(train_end, test_start.strftime("%Y-%m-%d")),
-        test=(test_start.strftime("%Y-%m-%d"), feat_end.strftime("%Y-%m-%d")),
+        test=(test_start.strftime("%Y-%m-%d"), data_end),
     )
 
     # XGB 预测

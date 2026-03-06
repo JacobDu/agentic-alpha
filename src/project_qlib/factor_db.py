@@ -940,8 +940,8 @@ class FactorDB:
                 for _, row in top.iterrows():
                     icir = row.get("rank_icir")
                     t = row.get("rank_ic_t")
-                    icir_s = f"{icir:+.3f}" if icir == icir else "N/A"
-                    t_s = f"{t:+.1f}" if t == t else "N/A"
+                    icir_s = f"{icir:+.3f}" if icir is not None and icir == icir else "N/A"
+                    t_s = f"{t:+.1f}" if t is not None and t == t else "N/A"
                     lines.append(
                         f"  {row['name']:30s} | ICIR={icir_s} | t={t_s} | {row['status']}"
                     )

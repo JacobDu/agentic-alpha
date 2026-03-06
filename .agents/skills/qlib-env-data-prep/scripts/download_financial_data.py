@@ -1284,8 +1284,8 @@ def main() -> int:
     parser.add_argument("--phase", type=int, choices=[1, 2],
                         help="1=daily OHLCV+valuation (default), "
                              "2=quarterly+dividends+industry.")
-    parser.add_argument("--market", default="all",
-                        help="Stock universe (default: all)")
+    parser.add_argument("--market", default="csi1000",
+                        help="Stock universe (default: csi1000)")
     parser.add_argument("--start", default="2000-01-01",
                         help="Start date for Phase 1 (default: 2000-01-01)")
     parser.add_argument("--end", default=None,

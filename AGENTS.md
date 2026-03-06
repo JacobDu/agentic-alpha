@@ -68,7 +68,7 @@
 
 ## 经验记忆（维护在本文件）
 
-### 当前 SOTA 基准（MFA-V4b, 2026-02-20）
+### 当前 SOTA 基准（MFA-V5, 2026-03-05）
 
 | 维度 | 配置 |
 |------|------|
@@ -82,17 +82,21 @@
 | XGB 参数 | eta=0.05, max_depth=8, colsample_bytree=0.8879, subsample=0.8789, alpha=205.70, lambda=580.98, n_estimators=1000 |
 | LGB 参数 | lr=0.05, max_depth=8, num_leaves=128, lambda_l1=205.70, lambda_l2=580.97, n_estimators=1000 |
 
-**OOS 性能（2025-01-01 ~ 2026-02-13，年内截断 OOS）**：
+**OOS 性能（2025-01-01 ~ 2026-03-04，年内截断 OOS）**：
 
 | 指标 | 值 |
 |------|-----|
-| 年化超额收益（含成本） | **+29.10%** |
-| IR（含成本） | **+1.920** |
-| 最大回撤 | **-7.00%** |
+| 年化超额收益（含成本） | **+21.75%** |
+| IR（含成本） | **+1.589** |
+| 最大回撤 | **-8.76%** |
+| 累计超额（含成本） | **+25.60%** |
+| 日均换手 | **2.74%** |
 
-> 证据：`outputs/mfa_v4b_results.json` → 实验 `C_roll3m_ens_tk30_h60`  
-> 文档：`docs/workflows/multi-factor/MFA-V4b-2026-02-20.md`  
-> DB：`data/factor_library.db` → `workflow_runs` / `workflow_mfa_metrics` (round_id=MFA-V4b-2026-02-20)
+> 证据：`outputs/mfa_v5_results.json` / `outputs/mfa_v4b_v5_comparison.json`  
+> 文档：`docs/workflows/multi-factor/MFA-V5-2026-03-05.md`  
+> DB：`data/factor_library.db` → `workflow_runs` / `workflow_mfa_metrics` (round_id=MFA-V5-2026-03-05)
+>
+> **注**：V4b 原始(旧数据)为 +29.10%/IR=1.920，差异来自 investment_data 版本更新（2026-03-05 release）的除权复权修正。同一配置在新数据下 OOS 至 2026-02-13 为 +20.17%/IR=1.479。
 
 维护原则：
 1. 仅记录可复用的结构化经验，不记录一次性日志。
@@ -102,7 +106,7 @@
 ### 推荐方向（最多50条）
 1. 在 `csi1000` 多因子组合中，优先测试 `hold_thresh=40` 的低换手配置；当候选池为“最新显著Top30”时，交易成本下降带来的净值改善显著。
 2. 线性加权（按 `rank_icir` 方向与绝对值权重）应作为 MFA 基准组合长期保留，用于快速筛掉退化的非线性配置。
-3. Rolling 3m + XGB+LGB Ensemble 是当前 MFA 最佳训练范式（OOS +29.10%, IR=1.920），应作为默认配置。
+3. Rolling 3m + XGB+LGB Ensemble 是当前 MFA 最佳训练范式（OOS +21.75%, IR=1.589, 数据版本 2026-03-05），应作为默认配置。
 4. `topk=30 + hold_thresh=60` 是 Rolling 模式下的最优组合参数；高 hold 阈值有效控制换手成本。
 5. 因子数 n=30 (max_per_cat=5)、训练起始 2018 年是 "less is more" 最优点；不宜盲目扩充。
 
