@@ -68,7 +68,7 @@
 
 ## 经验记忆（维护在本文件）
 
-### 当前 SOTA 基准（MFA-V5, 2026-03-05）
+### 当前 SOTA 基准（MFA-V6, 2026-03-06）
 
 | 维度 | 配置 |
 |------|------|
@@ -77,7 +77,7 @@
 | 训练起始 | 2018 年 |
 | 特征 | Alpha158 + DB 因子 Top30（max_per_cat=5） |
 | 预测目标 | 1d forward return |
-| 组合策略 | TopkDropoutStrategy（topk=30, n_drop=5, hold_thresh=60） |
+| 组合策略 | TopkDropoutStrategy（topk=20, n_drop=2, hold_thresh=80） |
 | 交易成本 | open=5bp, close=15bp, min_cost=5 |
 | XGB 参数 | eta=0.05, max_depth=8, colsample_bytree=0.8879, subsample=0.8789, alpha=205.70, lambda=580.98, n_estimators=1000 |
 | LGB 参数 | lr=0.05, max_depth=8, num_leaves=128, lambda_l1=205.70, lambda_l2=580.97, n_estimators=1000 |
@@ -86,17 +86,16 @@
 
 | 指标 | 值 |
 |------|-----|
-| 年化超额收益（含成本） | **+21.75%** |
-| IR（含成本） | **+1.589** |
-| 最大回撤 | **-8.76%** |
-| 累计超额（含成本） | **+25.60%** |
-| 日均换手 | **2.74%** |
+| 年化超额收益（含成本） | **+33.28%** |
+| IR（含成本） | **+1.847** |
+| 最大回撤 | **-11.66%** |
+| 日均换手 | **1.53%** |
 
-> 证据：`outputs/mfa_v5_results.json` / `outputs/mfa_v4b_v5_comparison.json`  
-> 文档：`docs/workflows/multi-factor/MFA-V5-2026-03-05.md`  
-> DB：`data/factor_library.db` → `workflow_runs` / `workflow_mfa_metrics` (round_id=MFA-V5-2026-03-05)
+> 证据：`outputs/mfa_v6_topk20_results.json`  
+> 文档：`docs/workflows/multi-factor/MFA-V6-2026-03-06.md`  
+> DB：`data/factor_library.db` → `workflow_runs` / `workflow_mfa_metrics` (round_id=MFA-V6-2026-03-06)
 >
-> **注**：V4b 原始(旧数据)为 +29.10%/IR=1.920，差异来自 investment_data 版本更新（2026-03-05 release）的除权复权修正。同一配置在新数据下 OOS 至 2026-02-13 为 +20.17%/IR=1.479。
+> **注**：V5 旧 SOTA (topk=30, IR=1.589, Ret=+21.75%) 已被取代。V6 同管线 baseline (topk=30) IR=0.907，V6 最优 (topk=20) IR=1.847，绝对 IR 相对 V5 提升 +16%。
 
 维护原则：
 1. 仅记录可复用的结构化经验，不记录一次性日志。
@@ -109,12 +108,14 @@
 3. Rolling 3m + XGB+LGB Ensemble 是当前 MFA 最佳训练范式（OOS +21.75%, IR=1.589, 数据版本 2026-03-05），应作为默认配置。
 4. `topk=30 + hold_thresh=60` 是 Rolling 模式下的最优组合参数；高 hold 阈值有效控制换手成本。
 5. 因子数 n=30 (max_per_cat=5)、训练起始 2018 年是 "less is more" 最优点；不宜盲目扩充。
-
+6. `topk=20 + n_drop=2 + hold_thresh=80` 是集中持仓的最优参数（V6 完整 5 窗口: IR=1.847, Ret=+33.28%, Turn=1.53%），高 hold 在困难市场（2026 Q1）中显著更稳健；已 Promote 为 SOTA。
+7. topk=20 参数搜索时优先降 `n_drop`（2~3）而非沿用 topk=30 的 `n_drop=5`——高换仓比例在集中组合中放大了成本与波动。8. MFA Rolling 流程内存优化三要素：(a) Ensemble 逐模型训练/预测，`del model` 后再训下一个；(b) 每个窗口结束后调用 `H.clear()` 清理 Qlib MemCache（特征表达式缓存）；(c) `gc.collect()` 配合 `del` 确保 Python 回收。峰值内存可降低 35-40%。
 ### 禁止方向（最多50条）
 1. 当候选池切换后，不要默认沿用旧模型结论；`LGB/Ensemble` 可能在 `hold<=20` 出现 IR 为负，必须先做统一口径回测再决策。
 2. 不要使用 2d/5d multi-day label 作为 TopkDropout 日频策略的预测目标 —— 1d label 是唯一有效目标（V4b 验证：label 工程使收益下降 54-82%）。
 3. 不要使用 6m 滚动或更长训练起始(2010-)—— 因子时效性短，旧数据引入噪声（V4b 验证：6m 落后 3m 达 +14%、2010 起始落后 2018 达 -14%）。
 4. 不要盲目增加因子数(n>30)—— 更多因子=更多噪声（V4b 验证：n40 比 n30 收益下降 -3.43%）。
+5. topk=20 时不要使用 `n_drop=5 + hold_thresh>=60`——V6 验证该组合 IR 仅 0.94~1.20，远逊于 n_drop=2 的 2.07（激进换仓在集中组合中严重拖累收益）。
 
 ## 脚本治理
 

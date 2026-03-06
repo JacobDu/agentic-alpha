@@ -2,14 +2,10 @@
 
 | round_id | date | hypothesis_short | market | ir_with_cost | mfa_result | decision | doc |
 |----------|------|------------------|--------|--------------|------------|----------|-----|
-| MFA-V5-2026-03-05 | 2026-03-05 | 数据刷新(2026-03-05)+SOTA验证,OOS延伸至03-04 | csi1000 | IR=1.589 | 年化+21.75%,累计+25.60%,DD=-8.76% | Promote | [MFA-V5-2026-03-05.md](MFA-V5-2026-03-05.md) |
-| MFA-2026-02-19-02 | 2026-02-19 | latest显著Top30因子池线性/非线性对照+高成本压力 | csi1000 | XGB+hold=40: IR=1.228 | XGB长持有最优且高成本稳健，但低于历史Promote配置 | Iterate | [MFA-2026-02-19-02.md](MFA-2026-02-19-02.md) |
-| MFA-2026-02-19-01 | 2026-02-19 | hold_thresh完整扫描(1d/2d/LGB/XGB，topk=30) | csi1000 | LGB+1d+hold=20: IR=1.564; XGB+1d+hold=10: IR=0.743 | hold=20最优(双峰效应)，XGB hold=10低回撤备选 | Promote | [MFA-2026-02-19-01.md](MFA-2026-02-19-01.md) |
-| MFA-2026-02-18-01 | 2026-02-18 | SFA-07新因子（8方向）融入Top30/50多因子组合 | csi1000 | -0.189（新Top30）vs 1.564（旧Top30） | 新因子未带来增量，旧Top30最优 | Iterate | [MFA-2026-02-18-01.md](MFA-2026-02-18-01.md) |
+| MFA-V5-2026-03-05 | 2026-03-05 | 数据刷新(2026-03-05 release)+SOTA验证,OOS延伸至2026-03-04 | csi1000 | 1.589 | 年化+21.75%, IR=1.589, DD=-8.76%, 累计+25.60% | Promote | docs/workflows/multi-factor/MFA-V5-2026-03-05.md |
+| MFA-V6-2026-03-06 | N/A | N/A | N/A | 1.847 | Promote: tk20_d2_h80 IR=1.847 Ret=+33.28% DD=-11.66% Turn=1.53% | Promote | N/A |
 
 维护规则：
 1. 每新增一轮 MFA 记录，需同步更新本索引。
 2. evidence 至少包含 doc/output_path/db_query/run_id 之一。
 3. decision 仅允许 Promote / Iterate / Drop。
-4. 记录结构遵循 R-G-E-D：Retrieve/Generate/Evaluate/Distill。
-5. 每轮至少给出线性+非线性方案对照与含成本指标。

@@ -139,6 +139,16 @@ def backtest(pred, topk=50, n_drop=5, hold=40, test_start=None, test_end=None):
     return m
 
 
+def _clear_qlib_cache():
+    """清理 Qlib 内存缓存，释放特征计算中间结果。"""
+    try:
+        from qlib.data.cache import H
+        H.clear()
+    except Exception:
+        pass
+    gc.collect()
+
+
 def rolling_retrain_predict(
     train_start, oos_start, oos_end,
     retrain_freq_months=3,
@@ -179,27 +189,34 @@ def rolling_retrain_predict(
 
             if model_type == "xgb":
                 model = train_xgb(ds)
+                p = predict(model, ds)
+                all_preds.append(p)
+                del model, ds
             elif model_type == "lgb":
                 model = train_lgb(ds)
+                p = predict(model, ds)
+                all_preds.append(p)
+                del model, ds
             elif model_type == "ensemble":
+                # 逐模型训练预测，避免双模型同时驻留
                 m1 = train_lgb(ds)
                 p1 = predict(m1, ds)
+                del m1
+                gc.collect()
                 m2 = train_xgb(ds)
                 p2 = predict(m2, ds)
-                idx = p1.index.intersection(p2.index)
-                p = (p1.loc[idx] + p2.loc[idx]) / 2
+                del m2, ds
+                combined = pd.DataFrame({"lgb": p1, "xgb": p2}).dropna()
+                p = combined.mean(axis=1)
                 p.name = "score"
                 all_preds.append(p)
-                del m1, m2, p1, p2, ds
-                gc.collect()
-                continue
+                del p1, p2, combined
 
-            p = predict(model, ds)
-            all_preds.append(p)
-            del model, ds
-            gc.collect()
+            _clear_qlib_cache()
+            print(f"      W{i+1}: {len(all_preds[-1])} predictions")
         except Exception as e:
             print(f"      W{i+1} ERROR: {e}")
+            _clear_qlib_cache()
             continue
 
     if not all_preds:

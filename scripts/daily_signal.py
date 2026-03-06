@@ -3,8 +3,11 @@
 
 数据源: baostock → Qlib 本地数据
 模型: XGBoost + LightGBM 均值集成 (Rolling 3m)
-策略: TopkDropout (topk=30, n_drop=5, hold_thresh=60)
+策略: TopkDropout (topk=20, n_drop=2, hold_thresh=80)
 特征: Alpha158 + DB 因子 Top30 (max_per_cat=5)
+
+SOTA 基准: MFA-V6 (2026-03-06)
+  OOS IR=1.847, Ret=+33.28%, DD=-11.66%, Turn=1.53%
 
 用法:
     # 首次运行（训练模型 + 生成信号）
@@ -81,12 +84,22 @@ def set_profile(profile_name: str | None):
 for d in [DRYRUN_DIR, MODEL_DIR, SIGNAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+
+def clear_qlib_cache():
+    """清理 Qlib 内存缓存，释放特征计算中间结果。"""
+    try:
+        from qlib.data.cache import H
+        H.clear()
+    except Exception:
+        pass
+    gc.collect()
+
 # ── 策略参数 ─────────────────────────────────────────────────────────
 MARKET = "csi1000"
 BENCHMARK = "SH000852"
-TOPK = 30
-N_DROP = 5
-HOLD_THRESH = 60
+TOPK = 20
+N_DROP = 2
+HOLD_THRESH = 80
 TOPN_FACTORS = 30
 MAX_PER_CAT = 5
 RETRAIN_FREQ_MONTHS = 3
@@ -277,13 +290,15 @@ def train_and_save_models(force=False):
     ds = create_dataset(train, valid, test)
     xgb_model = train_xgb(ds)
     save_model(xgb_model, "xgb_latest")
+    del xgb_model, ds
+    clear_qlib_cache()
 
     print("  训练 LightGBM...")
+    ds = create_dataset(train, valid, test)
     lgb_model = train_lgb(ds)
     save_model(lgb_model, "lgb_latest")
-
-    del ds
-    gc.collect()
+    del lgb_model, ds
+    clear_qlib_cache()
 
     state["last_retrain"] = today.strftime("%Y-%m-%d")
     state["train_range"] = f"{train[0]} ~ {train[1]}"
@@ -299,46 +314,52 @@ def train_and_save_models(force=False):
 def get_today_scores() -> pd.Series:
     """用 Ensemble 模型对所有 CSI1000 成分股打分。
 
+    逐模型加载预测以减少峰值内存：先 XGB 预测并释放，再 LGB 预测并释放。
     返回 Series，index = (date, instrument), value = score
     """
 
-    xgb_model = load_model("xgb_latest")
-    lgb_model = load_model("lgb_latest")
-
-    if xgb_model is None or lgb_model is None:
-        raise RuntimeError("模型文件不存在，请先运行 --init 或 --retrain")
-
     state = load_state()
     today = datetime.now()
-    # 测试段结束日不超过数据完整的最后一天
     data_end = _get_last_complete_calendar_date()
     test_start = today - timedelta(days=30)
 
     train_range = state.get("train_range", f"{TRAIN_START} ~ 2024-12-31")
     train_start, train_end = train_range.split(" ~ ")
 
-    ds = create_dataset(
+    seg_args = dict(
         train=(train_start, train_end),
         valid=(train_end, test_start.strftime("%Y-%m-%d")),
         test=(test_start.strftime("%Y-%m-%d"), data_end),
     )
 
     # XGB 预测
+    xgb_model = load_model("xgb_latest")
+    if xgb_model is None:
+        raise RuntimeError("XGB 模型文件不存在，请先运行 --init 或 --retrain")
+    ds = create_dataset(**seg_args)
     p_xgb = xgb_model.predict(ds)
     if isinstance(p_xgb, pd.DataFrame):
         p_xgb = p_xgb.iloc[:, 0]
+    del xgb_model, ds
+    clear_qlib_cache()
 
     # LGB 预测
+    lgb_model = load_model("lgb_latest")
+    if lgb_model is None:
+        raise RuntimeError("LGB 模型文件不存在，请先运行 --init 或 --retrain")
+    ds = create_dataset(**seg_args)
     p_lgb = lgb_model.predict(ds)
     if isinstance(p_lgb, pd.DataFrame):
         p_lgb = p_lgb.iloc[:, 0]
+    del lgb_model, ds
+    clear_qlib_cache()
 
-    # Ensemble: 简单平均
-    idx = p_xgb.index.intersection(p_lgb.index)
-    scores = (p_xgb.loc[idx] + p_lgb.loc[idx]) / 2
+    # Ensemble: 简单平均（DataFrame 对齐，安全处理 index 不一致）
+    combined = pd.DataFrame({"xgb": p_xgb, "lgb": p_lgb}).dropna()
+    scores = combined.mean(axis=1)
     scores.name = "score"
 
-    del ds, xgb_model, lgb_model
+    del p_xgb, p_lgb, combined
     gc.collect()
 
     return scores
@@ -658,7 +679,7 @@ def print_signal_summary(signal: dict):
 
 def cmd_init(args):
     """初始化：更新数据 + 训练模型 + 生成首日信号。"""
-    print("🚀 初始化 CSI1000 SOTA 策略 Dry-Run")
+    print("🚀 初始化 CSI1000 SOTA 策略 Dry-Run (MFA-V6)")
     print(f"   策略: Ensemble(XGB+LGB) + TopkDropout(tk={TOPK}, drop={N_DROP}, hold={HOLD_THRESH})")
     print(f"   特征: Alpha158 + DB因子Top{TOPN_FACTORS} (mpc={MAX_PER_CAT})")
 

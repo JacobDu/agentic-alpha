@@ -1,6 +1,6 @@
 # Daily Signal 使用指南
 
-使用 `scripts/daily_signal.py` 基于 SOTA 策略（MFA-V5）每日生成 CSI1000 组合仓位信号。
+使用 `scripts/daily_signal.py` 基于 SOTA 策略（MFA-V6）每日生成 CSI1000 组合仓位信号。
 
 ## 策略概要
 
@@ -8,7 +8,7 @@
 |------|------|
 | 模型 | XGBoost + LightGBM 均值集成 |
 | 特征 | Alpha158 + DB 因子 Top30（max_per_cat=5） |
-| 策略 | TopkDropout（topk=30, n_drop=5, hold_thresh=60） |
+| 策略 | TopkDropout（topk=20, n_drop=2, hold_thresh=80） |
 | 重训频率 | 每 3 个月自动触发 |
 | 交易成本 | 买入 5bp / 卖出 15bp / 最低 5 元 |
 | 默认初始资金 | 100 万元 |
@@ -121,18 +121,18 @@ outputs/dryrun/
   "date": "2026-03-05",
   "model_date": "2026-03-04",
   "total_scored": 998,
-  "portfolio_size_before": 30,
-  "portfolio_size_after": 30,
+  "portfolio_size_before": 20,
+  "portfolio_size_after": 20,
   "capital": 1000000,
-  "target_weight": 0.0333,
-  "target_amount_per_stock": 33333.33,
+  "target_weight": 0.05,
+  "target_amount_per_stock": 50000.00,
   "buy": [
     {
       "instrument": "SZ300123",
       "score": 0.012345,
       "rank": 5,
       "price": 25.60,
-      "target_amount": 33333.33,
+      "target_amount": 50000.00,
       "shares": 1300,
       "actual_amount": 33280.00,
       "estimated_cost": "0.05%"
@@ -174,7 +174,7 @@ outputs/dryrun/
       "entry_rank": 5,
       "shares": 1300,
       "entry_price": 25.60,
-      "target_amount": 33333.33
+      "target_amount": 50000.00
     }
   },
   "cash": 1000000,
@@ -203,9 +203,9 @@ uv run python scripts/daily_signal.py --status --profile conservative
 每日信号生成遵循以下逻辑：
 
 1. **全市场打分**：Ensemble 模型对 ~1000 只 CSI1000 成分股打分
-2. **排名筛选**：取 Top-60（hold_thresh）为候选池
-3. **卖出判定**：当前持仓中排名跌出 Top-60 的股票标记为卖出，每天最多卖 5 只（n_drop）
-4. **买入补位**：卖出后持仓不足 30（topk）只时，从 Top-30 中补入新股票
+2. **排名筛选**：取 Top-80（hold_thresh）为候选池
+3. **卖出判定**：当前持仓中排名跌出 Top-80 的股票标记为卖出，每天最多卖 2 只（n_drop）
+4. **买入补位**：卖出后持仓不足 20（topk）只时，从 Top-20 中补入新股票
 5. **仓位等权**：每只股票目标金额 = 总资金 / 持仓数，按 100 股整手取整
 
 ## 典型日常工作流
