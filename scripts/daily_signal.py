@@ -35,6 +35,7 @@ import gc
 import json
 import os
 import pickle
+import random
 import sys
 import time
 import warnings
@@ -94,6 +95,13 @@ def clear_qlib_cache():
         pass
     gc.collect()
 
+
+def set_global_seed(seed: int):
+    """固定训练随机性，降低滚动训练重复运行漂移。"""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
 # ── 策略参数 ─────────────────────────────────────────────────────────
 MARKET = "csi1000"
 BENCHMARK = "SH000852"
@@ -104,6 +112,7 @@ TOPN_FACTORS = 30
 MAX_PER_CAT = 5
 RETRAIN_FREQ_MONTHS = 3
 TRAIN_START = "2018-01-01"
+GLOBAL_SEED = 3407
 
 # 资金与交易成本
 INITIAL_CAPITAL = 1_000_000  # 初始资金 100 万元
@@ -118,6 +127,8 @@ XGB_PARAMS = dict(
     colsample_bytree=0.8879, subsample=0.8789,
     alpha=205.6999, reg_lambda=580.9768,
     nthread=8,
+    seed=GLOBAL_SEED,
+    random_state=GLOBAL_SEED,
 )
 
 # LightGBM 参数
@@ -127,6 +138,12 @@ LGB_PARAMS = dict(
     subsample=0.8789, lambda_l1=205.6999, lambda_l2=580.9768,
     max_depth=8, num_leaves=128, num_threads=8,
     n_estimators=1000, early_stopping_rounds=50,
+    seed=GLOBAL_SEED,
+    feature_fraction_seed=GLOBAL_SEED,
+    bagging_seed=GLOBAL_SEED,
+    data_random_seed=GLOBAL_SEED,
+    deterministic=True,
+    force_col_wise=True,
 )
 
 
@@ -182,6 +199,26 @@ def _get_last_complete_calendar_date() -> str:
         if dates:
             return dates[-1]
     return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _load_trading_calendar() -> list[str]:
+    """加载交易日历。"""
+    cal_file = ROOT / "data/qlib/cn_data/calendars/day.txt"
+    if not cal_file.exists():
+        return []
+    return [l.strip() for l in cal_file.read_text().splitlines() if l.strip()]
+
+
+def _calc_holding_days(entry_date: str | None, trade_date: str, calendar: list[str]) -> int:
+    """按交易日计算已持有天数，不含买入当日。"""
+    if not entry_date or not calendar:
+        return 0
+    try:
+        entry_idx = calendar.index(entry_date)
+        trade_idx = calendar.index(trade_date)
+    except ValueError:
+        return 0
+    return max(0, trade_idx - entry_idx)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -270,6 +307,8 @@ def train_and_save_models(force=False):
     if not force and not needs_retrain(state):
         print(f"  模型无需重训（上次训练: {state['last_retrain']}）")
         return
+
+    set_global_seed(GLOBAL_SEED)
 
     today = datetime.now()
     valid_start = today - relativedelta(years=1)
@@ -400,7 +439,9 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
         信号字典，包含 buy/sell/hold 列表（含目标金额和股数）
     """
     portfolio = load_portfolio()
-    current_holdings = set(portfolio.get("holdings", {}).keys())
+    holdings = portfolio.get("holdings", {})
+    current_stock_list = list(holdings.keys())
+    current_holdings = set(current_stock_list)
 
     # 获取当日所有股票分数并排名
     # scores 的 index 是 MultiIndex(date, instrument)
@@ -427,26 +468,31 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
     day_scores = day_scores.dropna().sort_values(ascending=False)
     actual_date = str(latest_date)[:10] if isinstance(scores.index, pd.MultiIndex) else trade_date
 
-    # ── TopkDropout 逻辑 ────────────────────────────────────────────
-    top_instruments = set(day_scores.index[:HOLD_THRESH])  # 排名在 hold_thresh 内的股票
-    top_k = set(day_scores.index[:TOPK])  # 排名在 topk 内的股票
+    # ── TopkDropout 逻辑（与回测口径一致）──────────────────────────
+    last = day_scores.reindex(current_stock_list).sort_values(ascending=False).index
+    today = day_scores[~day_scores.index.isin(last)].index[: N_DROP + TOPK - len(last)]
+    comb = day_scores.reindex(last.union(pd.Index(today))).sort_values(ascending=False).index
+    bottom_n = set(comb[-N_DROP:]) if len(comb) > 0 else set()
+    sell_candidates = [inst for inst in last if inst in bottom_n]
 
-    # 需要卖出的: 当前持仓中排名跌出 hold_thresh 的
-    to_sell_candidates = current_holdings - top_instruments
-    # 限制每天最多卖出 n_drop 只
-    to_sell = set(list(to_sell_candidates)[:N_DROP])
+    calendar = _load_trading_calendar()
+    to_sell: list[str] = []
+    blocked_sell: list[dict] = []
+    for inst in sell_candidates:
+        held_info = holdings.get(inst, {})
+        held_days = _calc_holding_days(held_info.get("entry_date"), trade_date, calendar)
+        if held_days < HOLD_THRESH:
+            blocked_sell.append({
+                "instrument": inst,
+                "held_days": held_days,
+                "required_days": HOLD_THRESH,
+            })
+            continue
+        to_sell.append(inst)
 
-    # 卖出后的持仓
-    after_sell = current_holdings - to_sell
-
-    # 需要补充到 topk 的持仓数
-    n_to_buy = TOPK - len(after_sell)
-
-    # 从 top_k 中选择不在现有持仓中的
-    buy_candidates = [s for s in day_scores.index if s in top_k and s not in after_sell]
-    to_buy = buy_candidates[:max(0, n_to_buy)]
-
-    # 继续持有的
+    after_sell = current_holdings - set(to_sell)
+    n_to_buy = max(0, len(to_sell) + TOPK - len(last))
+    to_buy = [inst for inst in today if inst not in after_sell][:n_to_buy]
     to_hold = list(after_sell)
 
     # ── 获取收盘价并计算仓位 ────────────────────────────────────────
@@ -464,6 +510,7 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
         "total_scored": len(day_scores),
         "buy": [],
         "sell": [],
+        "sell_blocked": [],
         "hold": [],
         "portfolio_size_before": len(current_holdings),
         "portfolio_size_after": total_positions,
@@ -495,24 +542,37 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
         rank = list(day_scores.index).index(inst) + 1 if inst in day_scores.index else -1
         price = prices.get(inst)
         # 卖出数量 = 组合中该股票的当前持仓量
-        held_info = portfolio.get("holdings", {}).get(inst, {})
+        held_info = holdings.get(inst, {})
         held_shares = held_info.get("shares", 0)
+        held_days = _calc_holding_days(held_info.get("entry_date"), trade_date, calendar)
         signal["sell"].append({
             "instrument": inst,
             "score": round(float(day_scores.get(inst, 0)), 6),
             "rank": rank,
             "price": round(price, 2) if price else None,
             "shares": held_shares,
+            "held_days": held_days,
             "estimated_amount": round(held_shares * price, 2) if price and held_shares else 0,
-            "reason": "排名跌出 hold_thresh" if rank > HOLD_THRESH else "清退",
+            "reason": "TopkDropout底部淘汰",
             "estimated_cost": f"{CLOSE_COST * 100:.2f}%",
+        })
+
+    for item in blocked_sell:
+        inst = item["instrument"]
+        rank = list(day_scores.index).index(inst) + 1 if inst in day_scores.index else -1
+        signal["sell_blocked"].append({
+            "instrument": inst,
+            "rank": rank,
+            "held_days": item["held_days"],
+            "required_days": item["required_days"],
+            "reason": f"持有{item['held_days']}天 < hold_thresh={item['required_days']}",
         })
 
     # 持有信号
     for inst in sorted(to_hold):
         rank = list(day_scores.index).index(inst) + 1 if inst in day_scores.index else -1
         price = prices.get(inst)
-        held_info = portfolio.get("holdings", {}).get(inst, {})
+        held_info = holdings.get(inst, {})
         held_shares = held_info.get("shares", 0)
         signal["hold"].append({
             "instrument": inst,
@@ -520,6 +580,7 @@ def generate_signals(scores: pd.Series, trade_date: str) -> dict:
             "rank": rank,
             "price": round(price, 2) if price else None,
             "shares": held_shares,
+            "held_days": _calc_holding_days(held_info.get("entry_date"), trade_date, calendar),
             "market_value": round(held_shares * price, 2) if price and held_shares else 0,
         })
 
@@ -655,19 +716,28 @@ def print_signal_summary(signal: dict):
 
     if signal["sell"]:
         print(f"\n🔴 卖出 ({len(signal['sell'])} 只):")
-        print(f"  {'股票':<12} {'现价':>8} {'股数':>8} {'金额':>12} {'排名':>6} {'原因':<16}")
-        print(f"  {'-'*68}")
+        print(f"  {'股票':<12} {'现价':>8} {'股数':>8} {'金额':>12} {'排名':>6} {'持有':>6} {'原因':<18}")
+        print(f"  {'-'*78}")
         for s in signal["sell"]:
             price_str = f"{s['price']:.2f}" if s.get('price') else '  N/A'
             shares_str = f"{s['shares']:>6d}" if s.get('shares') else '   N/A'
             amount_str = f"{s.get('estimated_amount', 0):>10,.0f}" if s.get('estimated_amount') else '       N/A'
-            print(f"  {s['instrument']:<12} {price_str:>8} {shares_str:>8} {amount_str:>12} {s['rank']:>6d} {s.get('reason',''):<16}")
+            held_days = s.get("held_days", 0)
+            print(f"  {s['instrument']:<12} {price_str:>8} {shares_str:>8} {amount_str:>12} {s['rank']:>6d} {held_days:>6d} {s.get('reason',''):<18}")
+
+    if signal.get("sell_blocked"):
+        print(f"\n🟡 候选卖出但未执行 ({len(signal['sell_blocked'])} 只):")
+        top5 = sorted(signal["sell_blocked"], key=lambda x: x["rank"])[:5]
+        for s in top5:
+            print(f"  {s['instrument']:<12} rank={s['rank']:>4d}  {s['reason']}")
+        if len(signal["sell_blocked"]) > 5:
+            print(f"  ... 及其他 {len(signal['sell_blocked'])-5} 只")
 
     if signal["hold"]:
         print(f"\n⚪ 持有 ({len(signal['hold'])} 只):")
         top5 = sorted(signal["hold"], key=lambda x: x["rank"])[:5]
         for h in top5:
-            print(f"  {h['instrument']:<12} rank={h['rank']:>4d}  score={h['score']:.6f}")
+            print(f"  {h['instrument']:<12} rank={h['rank']:>4d}  hold={h.get('held_days', 0):>3d}d  score={h['score']:.6f}")
         if len(signal["hold"]) > 5:
             print(f"  ... 及其他 {len(signal['hold'])-5} 只")
 
@@ -835,6 +905,8 @@ def main():
                         help="策略配置名称，支持同时运行多个独立实例（如: test1, conservative）")
 
     args = parser.parse_args()
+
+    set_global_seed(GLOBAL_SEED)
 
     # 设置 profile
     if args.profile:

@@ -3,7 +3,7 @@
 每完成一个实验即增量保存，防止中断丢失。
 """
 from __future__ import annotations
-import gc, json, sys, time, warnings
+import gc, json, os, random, sys, time, warnings
 from pathlib import Path
 import numpy as np, pandas as pd
 
@@ -24,6 +24,13 @@ EXCHANGE = {
     "limit_threshold": 0.095, "deal_price": "close",
     "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5,
 }
+GLOBAL_SEED = 3407
+
+
+def set_global_seed(seed=GLOBAL_SEED):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 def init_qlib():
@@ -79,6 +86,7 @@ def train_xgb(ds, **kw):
         objective="reg:squarederror", max_depth=8, eta=0.05,
         colsample_bytree=0.8879, subsample=0.8789,
         alpha=205.6999, reg_lambda=580.9768, nthread=8,
+        seed=GLOBAL_SEED, random_state=GLOBAL_SEED,
     )
     params.update(kw)
     model = XGBModel(**params)
@@ -93,6 +101,12 @@ def train_lgb(ds):
         subsample=0.8789, lambda_l1=205.6999, lambda_l2=580.9768,
         max_depth=8, num_leaves=128, num_threads=8,
         n_estimators=1000, early_stopping_rounds=50,
+        seed=GLOBAL_SEED,
+        feature_fraction_seed=GLOBAL_SEED,
+        bagging_seed=GLOBAL_SEED,
+        data_random_seed=GLOBAL_SEED,
+        deterministic=True,
+        force_col_wise=True,
     )
     model = LGBModel(**params)
     model.fit(ds)
@@ -157,6 +171,8 @@ def rolling_retrain_predict(
 ):
     from dateutil.relativedelta import relativedelta
     from datetime import datetime
+
+    set_global_seed(GLOBAL_SEED)
 
     oos_dt = datetime.strptime(oos_start, "%Y-%m-%d")
     oos_end_dt = datetime.strptime(oos_end, "%Y-%m-%d")

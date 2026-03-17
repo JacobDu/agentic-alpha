@@ -142,12 +142,22 @@ outputs/dryrun/
     {
       "instrument": "SH600456",
       "score": -0.001234,
-      "rank": 75,
+      "rank": 120,
       "price": 18.30,
       "shares": 1800,
+      "held_days": 83,
       "estimated_amount": 32940.00,
-      "reason": "排名跌出 hold_thresh",
+      "reason": "TopkDropout底部淘汰",
       "estimated_cost": "0.15%"
+    }
+  ],
+  "sell_blocked": [
+    {
+      "instrument": "SZ300999",
+      "rank": 140,
+      "held_days": 12,
+      "required_days": 80,
+      "reason": "持有12天 < hold_thresh=80"
     }
   ],
   "hold": [
@@ -157,6 +167,7 @@ outputs/dryrun/
       "rank": 12,
       "price": 42.10,
       "shares": 700,
+      "held_days": 83,
       "market_value": 29470.00
     }
   ]
@@ -203,10 +214,12 @@ uv run python scripts/daily_signal.py --status --profile conservative
 每日信号生成遵循以下逻辑：
 
 1. **全市场打分**：Ensemble 模型对 ~1000 只 CSI1000 成分股打分
-2. **排名筛选**：取 Top-80（hold_thresh）为候选池
-3. **卖出判定**：当前持仓中排名跌出 Top-80 的股票标记为卖出，每天最多卖 2 只（n_drop）
-4. **买入补位**：卖出后持仓不足 20（topk）只时，从 Top-20 中补入新股票
-5. **仓位等权**：每只股票目标金额 = 总资金 / 持仓数，按 100 股整手取整
+2. **旧持仓排序**：将当前持仓按最新分数重排，得到当前组合内部强弱顺序
+3. **新候选生成**：从非持仓股票里取最高分候选，候选数约为 `n_drop + topk - 当前持仓数`
+4. **底部淘汰**：将“旧持仓 + 新候选”合并排序，取最差的 `n_drop` 只作为卖出候选
+5. **持有期约束**：只有持有天数达到 `hold_thresh` 的卖出候选才允许真的卖出
+6. **买入补位**：按卖出数量补入高分新候选，尽量维持组合在 `topk`
+7. **仓位等权**：每只股票目标金额 = 总资金 / 持仓数，按 100 股整手取整
 
 ## 典型日常工作流
 
