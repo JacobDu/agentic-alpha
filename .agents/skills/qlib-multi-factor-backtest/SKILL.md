@@ -35,10 +35,18 @@ description: 负责 Top-N 多因子训练与含交易成本组合回测。用于
 ### 1) Retrieve
 1. 从因子总表与 workflow 记录读取候选池与稳定因子集。
 2. 明确本轮目标（增益、降回撤、降换手、稳健性）。
+3. **因子池质量门控**：
+   - 检查候选因子的 IC 衰减曲线（`factor_ic_decay` 表）
+   - 检查因子稳定性评分（`stability_score`）
+   - 周频调仓时：优先选择 5d ICIR 保留率 >= 0.5 的因子
+   - 排除稳定性评分 < 0.3 的因子
 
 ### 2) Generate
 1. 构造至少两类组合器方案：线性 + 非线性。
 2. 固定同一训练/验证/测试切分，保证可比性。
+3. **调仓频率方案**：必须同时测试日频与周频两类方案：
+   - 日频：TopkDropout，1d label，每日调仓
+   - 周频：Weekly Rebalance，5d label，每 5 个交易日调仓
 
 ### 3) Evaluate
 1. 统一回测口径输出 `excess_return_annualized_with_cost`、`information_ratio_with_cost`、`max_drawdown_with_cost`，并补充 `excess_return_daily_with_cost`。
@@ -65,6 +73,9 @@ description: 负责 Top-N 多因子训练与含交易成本组合回测。用于
 - `scripts/train_csi1000_lite.py`
 - `scripts/train_csiall_lite.py`
 - `scripts/train_csiall_topn.py`
+
+### 周频调仓
+- `scripts/train_weekly_rebal.py`（周频调仓回测，5d label + 每 N 日调仓）
 
 ### 可视化与记录
 - `scripts/visualize_factors.py`

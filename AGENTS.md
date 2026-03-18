@@ -1,7 +1,7 @@
 # AGENTS.md
 
 本文件只维护三类信息：
-1. 核心工作流编排（R-G-E-D）
+1. 核心工作流编排（R-G-E-V-D）
 2. 全局硬门槛规则
 3. 经验记忆与脚本治理
 
@@ -10,19 +10,32 @@
 通过 Agent 持续研究循环，沉淀可复用的高质量因子资产库。
 默认市场：`csi1000`。
 
-## 核心工作流（R-G-E-D）
+## 核心工作流（R-G-E-V-D）
 
-`Retrieve -> Generate -> Evaluate -> Distill`
+`Retrieve -> Generate -> Evaluate -> Validate -> Distill`
+
+### 因子创意研究（Research）
+1. 调用 `$factor-research-review` 从研报/论文中提取因子构造思路。
+2. 生成因子假设卡片（YAML），维护 `docs/factor_ideas/backlog.md`。
+3. 想法验证后分流：通过 → SFA Generate；失败 → `docs/factor_ideas/rejected_ideas.md`。
 
 ### 单因子挖掘（SFA）
 1. Retrieve：调用 `$qlib-env-data-prep` 完成环境门禁；检索 `data/factor_library.db` 因子总表、历史 SFA 记录、经验记忆。
 2. Generate：调用 `$qlib-single-factor-mining` 生成候选表达式，优先遵循“推荐方向”，避开“禁止方向”。
 3. Evaluate：调用 `$qlib-single-factor-mining` 执行预检、显著性检验与相关性预算约束。
-4. Distill：写入 `docs/workflows/single-factor/` 与 `data/factor_library.db`，并更新本文件经验记忆。
+4. **Validate**：执行深度验证（新增）：
+   - IC 衰减分析：`test_factor_ic_decay.py`，填充 `factor_ic_decay` 表
+   - 稳定性分析：`test_factor_stability.py`，评估 rolling IC 稳定性
+   - 相关性矩阵：`analyze_factor_correlation.py`，填充 `factor_similarity` 表
+   - 周持仓适配：标记 `weekly_suitable`（基于 5d/1d ICIR 比率）
+5. Distill：写入 `docs/workflows/single-factor/` 与 `data/factor_library.db`，并更新本文件经验记忆。
 
 ### 多因子组合（MFA）
 1. Retrieve：调用 `$qlib-env-data-prep` 完成环境门禁；检索候选因子池、稳定因子集、历史 MFA 记录。
+   - **因子池质量检查**：从 `factor_ic_decay` 表获取 5d ICIR、从稳定性分析获取 stability_score
+   - 周频调仓时，仅允许 `weekly_suitable=True` 的因子进入组合
 2. Generate：调用 `$qlib-multi-factor-backtest` 构造线性与非线性组合方案。
+   - 必须同时测试日频（TopkDropout）与周频（Weekly Rebalance）两类调仓策略
 3. Evaluate：调用 `$qlib-multi-factor-backtest` 执行统一区间回测，输出含成本收益/风险指标与压力测试结果。
 4. Distill：写入 `docs/workflows/multi-factor/` 与 `data/factor_library.db`，并更新本文件经验记忆。
 
@@ -39,6 +52,12 @@
 ### 正交性预算
 - `max|rho| <= 0.50`
 
+### SFA Validate 门槛（新增）
+- **IC 衰减**：`factor_ic_decay` 表必须有 1d/5d 两个 horizon 的记录
+- **周适用性**：`5d_ICIR / 1d_ICIR >= 0.5` → 标记 `weekly_suitable=True`
+- **稳定性**：`stability_score >= 0.3`（低于此值 Drop）
+- **近期有效性**：`ic_recent_vs_full >= 0.5`（IC 近期严重退化的因子不入池）
+
 ### 替换门槛（高相似因子）
 - 触发条件：相关性 `> 0.80`
 - 允许替换条件：新因子 `|ICIR|` 相对旧因子提升 `>= 20%`
@@ -48,7 +67,16 @@
 - 验证集（Valid）：`2024-01-01 ~ 2024-12-31`
 - OOS 测试集（Test/OOS）：`2025-01-01 ~ 数据最新可用日`
 - 若数据最新日早于 `2026-12-31`，必须在文档中明确“2026 为年内截断 OOS”。
-
+### 周频调仓策略（Weekly Rebalance）
+- **适用场景**：持股周期 5~10 交易日的组合策略
+- **Label**：5d forward return（`Ref($close, -5)/Ref($close, -1) - 1`）
+- **调仓频率**：每 5 个交易日调仓一次（可参数化 3/5/10）
+- **因子筛选**：仅使用 `weekly_suitable=True` 的因子
+- **策略差异**：
+  - 日频（TopkDropout）：1d label + 每日调仓 + hold_thresh 控制换手
+  - 周频（Weekly Rebalance）：5d label + 定期调仓 + 自然低换手
+- **执行脚本**：`$qlib-multi-factor-backtest` → `scripts/train_weekly_rebal.py`
+- **与 TopkDropout 的关系**：两种策略互补，周频不要求 `hold_thresh`；日频策略中 5d label 仍然无效（V4b 结论不变）
 ### 指标术语与字段标准
 - 统一采用 `docs/METRIC_STANDARD_V1.md`。
 - 强制区分：
