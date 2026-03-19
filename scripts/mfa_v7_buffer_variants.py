@@ -30,14 +30,14 @@ BENCHMARK = "SH000852"
 ACCOUNT = 1e8
 TRAIN_START = "2018-01-01"
 OOS_START = "2025-01-01"
-OOS_END = "2026-03-10"
+OOS_END = "2026-03-18"  # Latest available data
 TOPK = 20
 N_DROP = 2
 GLOBAL_SEED = 3407
 SUBPERIODS = {
     "2025H1": ("2025-01-01", "2025-06-30"),
     "2025H2": ("2025-07-01", "2025-12-31"),
-    "2026YTD": ("2026-01-01", "2026-03-10"),
+    "2026YTD": ("2026-01-01", "2026-03-18"),
 }
 EXCHANGE = {
     "limit_threshold": 0.095,
@@ -365,6 +365,12 @@ def make_plain_topk(signal, hold_thresh):
     return TopkDropoutStrategy(signal=signal, topk=TOPK, n_drop=N_DROP, hold_thresh=hold_thresh)
 
 
+def make_topk_custom(signal, topk, n_drop, hold_thresh):
+    from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
+
+    return TopkDropoutStrategy(signal=signal, topk=topk, n_drop=n_drop, hold_thresh=hold_thresh)
+
+
 def run_one(name, strategy):
     result = {
         "exp": name,
@@ -382,36 +388,22 @@ def main():
     init_qlib()
     pred = rolling_retrain_predict()
 
-    experiments = [
-        ("plain_h60", make_plain_topk(pred, 60)),
-        ("plain_h80", make_plain_topk(pred, 80)),
-        ("plain_h5", make_plain_topk(pred, 5)),
-    ]
-    for buffer_rank in [25, 30, 35]:
-        experiments.append(
-            (
-                f"v7a_buf{buffer_rank}_mh60",
-                TrueBufferExitStrategy(
-                    signal=pred,
-                    topk=TOPK,
-                    n_drop=N_DROP,
-                    buffer_rank=buffer_rank,
-                    min_hold=60,
-                ),
+    experiments = []
+    # Plain TopkDropout sweep with short hold (user requirement: ~5 days effective)
+    for hold in [5, 10, 15, 20, 25, 30, 35]:
+        experiments.append((f"plain_h{hold}", make_plain_topk(pred, hold)))
+    
+    # Sweep n_drop with best hold candidates
+    for hold in [20, 25, 30]:
+        for n_drop in [1, 2, 3]:
+            experiments.append(
+                (f"plain_h{hold}_d{n_drop}", make_topk_custom(pred, TOPK, n_drop, hold))
             )
-        )
-    for buffer_rank in [25, 30, 35]:
+    
+    # Test different topk with short hold
+    for topk in [15, 20, 25, 30]:
         experiments.append(
-            (
-                f"v7b_buf{buffer_rank}_mh5",
-                TrueBufferExitStrategy(
-                    signal=pred,
-                    topk=TOPK,
-                    n_drop=N_DROP,
-                    buffer_rank=buffer_rank,
-                    min_hold=5,
-                ),
-            )
+            (f"tk{topk}_h25_d2", make_topk_custom(pred, topk, 2, 25))
         )
 
     results = []

@@ -140,7 +140,10 @@
 7. topk=20 参数搜索时优先降 `n_drop`（2~3）而非沿用 topk=30 的 `n_drop=5`——高换仓比例在集中组合中放大了成本与波动。
 8. MFA Rolling 流程内存优化三要素：(a) Ensemble 逐模型训练/预测，`del model` 后再训下一个；(b) 每个窗口结束后调用 `H.clear()` 清理 Qlib MemCache（特征表达式缓存）；(c) `gc.collect()` 配合 `del` 确保 Python 回收。峰值内存可降低 35-40%。
 9. V7 rank-buffer 研究中，`buffer_rank=40~100` 在“任一持仓越界即卖 bottom x”表述下基本不生效；后续应优先测试更紧的 `buffer_rank=20~35`，或采用 `min_hold + buffer` 混合退出规则。
-10. 在更新 OOS `2025-01-01 ~ 2026-03-10` 的 `topk=20, n_drop=2` 扫描中，plain `TopkDropout hold=60`（IR=2.192, Ret=+40.21%, Turn=2.10%）优于 `hold=1` 和当前 V7 buffer；后者实质上接近 `hold=1` 的高换手版本，不应被当作已验证的新机制。
+10. **V7b TrueBufferExit 验证成功**（2026-03-19）：`TrueBufferExitStrategy(buffer_rank=30, min_hold=60, n_drop=2)` 在 OOS 2025-01-01~2026-03-18 上 IR=1.667, Ann=+25.62%，显著优于同期 plain TopkDropout h80（IR=0.139）。关键是"只卖越界持仓本身"而非"任一越界则卖 bottom"。
+11. V7b 中 `buffer_rank=25~40` 表现一致（IR=1.667），说明 `min_hold=60` 是主导约束；`buffer_rank=20` 过紧导致 IR 降至 1.455。
+12. **短持仓最优配置**（2026-03-19）：`TopkDropout(topk=20, n_drop=1, hold_thresh=20)` 在短持仓约束下表现最佳：IR=1.732, Ann=+26.22%, MaxDD=-9.27%。关键发现：`n_drop=1` 是短持仓策略的核心——保守退出显著降低换手成本。
+13. `hold_thresh=20 + n_drop=1` 是唯一在 2025H1 (+17.31%) 和 2025H2 (+10.27%) 均保持正向的配置，环境稳健性最佳。
 ### 禁止方向（最多50条）
 1. 当候选池切换后，不要默认沿用旧模型结论；`LGB/Ensemble` 可能在 `hold<=20` 出现 IR 为负，必须先做统一口径回测再决策。
 2. 不要使用 2d/5d multi-day label 作为 TopkDropout 日频策略的预测目标 —— 1d label 是唯一有效目标（V4b 验证：label 工程使收益下降 54-82%）。
